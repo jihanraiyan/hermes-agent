@@ -614,7 +614,14 @@ export function useMainApp(gw: GatewayClient) {
           sys('prompt cancelled')
         }
 
-        patchOverlayState({ clarify: null })
+        // Guard the clear by request id: _respond() sets the server event
+        // (unblocking the agent) BEFORE this RPC response is delivered, so the
+        // agent can emit a fresh clarify.request before this callback runs.
+        // Clearing unconditionally would wipe that new prompt. (Same guard the
+        // failure path above uses.)
+        if (getOverlayState().clarify?.requestId === clarify.requestId) {
+          patchOverlayState({ clarify: null })
+        }
       })
     },
     [appendMessage, overlay.clarify, rpc, sys]
@@ -880,8 +887,13 @@ export function useMainApp(gw: GatewayClient) {
         'sudo.respond',
         { password: pw, request_id: requestId },
         () => {
-          patchOverlayState({ sudo: null })
-          patchUiState({ status: 'running…' })
+          // Guard by request id: the server event fires before this RPC
+          // resolves, so the agent may have opened a fresh sudo prompt before
+          // this callback runs — only clear the one we submitted.
+          if (getOverlayState().sudo?.requestId === requestId) {
+            patchOverlayState({ sudo: null })
+            patchUiState({ status: 'running…' })
+          }
         },
         // RPC failed — usually "no pending sudo request" because the
         // server-side _block already timed out. prompt.expire SHOULD have
@@ -912,8 +924,13 @@ export function useMainApp(gw: GatewayClient) {
         'secret.respond',
         { request_id: requestId, value },
         () => {
-          patchOverlayState({ secret: null })
-          patchUiState({ status: 'running…' })
+          // Guard by request id — see answerSudo above (the server event fires
+          // before this RPC resolves, so a fresh secret prompt may already be
+          // mounted).
+          if (getOverlayState().secret?.requestId === requestId) {
+            patchOverlayState({ secret: null })
+            patchUiState({ status: 'running…' })
+          }
         },
         // Same dead-prompt guard as sudo — see answerSudo above.
         () => {

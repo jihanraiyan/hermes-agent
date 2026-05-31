@@ -5298,24 +5298,30 @@ def test_block_respond_race_is_atomic_under_lock(monkeypatch):
     _answers must not allow _block to pop and emit a false prompt.expire.
     The _pending_lock makes the two mutually exclusive. Run many short-
     timeout blocks with a concurrent responder racing the deadline and
-    assert: whenever the response succeeded (status ok), NO expire fired
-    for that rid; whenever it failed (4009), the answer was empty.
+    assert the full invariant per round: whenever the response succeeded
+    (status ok) the answer was delivered AND no prompt.expire fired for
+    that request; whenever it failed (4009) the answer was empty (an
+    expiry there is legitimate). Each round uses a unique sid+rid so
+    expiries can be mapped back to the round that produced them.
     """
     import concurrent.futures
 
-    false_expiries = []
-    real_emit = None
+    # Records every prompt.expire as (request_id, sid) so we can map an
+    # expiry back to the exact round/request it fired for.
+    expiries = []
 
     def tracking_emit(event, sid, payload=None):
         if event == "prompt.expire" and payload:
-            false_expiries.append((payload.get("request_id"), sid))
+            expiries.append((payload.get("request_id"), sid))
 
     monkeypatch.setattr(server, "_emit", tracking_emit)
 
-    results = {"answered": 0, "expired_ok": 0, "respond_ok": 0, "respond_late": 0}
+    results = {"respond_ok": 0, "respond_late": 0}
 
     def one_round(i):
         sid = f"sid_race_{i}"
+        captured: dict[str, str | None] = {"rid": None}
+
         # responder thread: wait until the prompt is pending, then respond
         # right around the deadline to maximize interleaving.
         def responder():
@@ -5323,11 +5329,11 @@ def test_block_respond_race_is_atomic_under_lock(monkeypatch):
                 with server._pending_lock:
                     rid = next((k for k, (s, _e) in server._pending.items() if s == sid), None)
                 if rid:
-                    resp = server.handle_request(
+                    captured["rid"] = rid
+                    return server.handle_request(
                         {"id": "x", "method": "clarify.respond",
                          "params": {"request_id": rid, "answer": f"ans{i}"}}
                     )
-                    return resp
                 time.sleep(0.0005)
             return None
 
@@ -5336,23 +5342,29 @@ def test_block_respond_race_is_atomic_under_lock(monkeypatch):
             ans = server._block("clarify.request", sid, {"q": "?"}, timeout=0.02)
             resp = fut.result(timeout=5)
 
+        rid = captured["rid"]
+        # Expiries that fired for THIS round's request (or session).
+        round_expiries = [e for e in expiries if e[1] == sid or (rid is not None and e[0] == rid)]
+
         respond_succeeded = bool(resp and resp.get("result"))
         if respond_succeeded:
             results["respond_ok"] += 1
-            # CRITICAL: a successful respond must mean the answer was delivered
-            # AND no false expiry fired for this session.
+            # CRITICAL invariant: a successful respond must deliver the answer
+            # AND must NOT have produced a prompt.expire for this request. This
+            # is the race the lock closes — a regression that fires expiry while
+            # still returning the answer fails HERE (the old test missed it).
             assert ans == f"ans{i}", f"round {i}: respond ok but answer lost ({ans!r})"
+            assert not round_expiries, (
+                f"round {i}: respond succeeded but a false prompt.expire fired "
+                f"for it: {round_expiries}"
+            )
         else:
             results["respond_late"] += 1
-            # respond came after pop → 4009; answer must be empty, expiry ok.
+            # respond came after the pop → 4009; answer must be empty and an
+            # expiry for this round is legitimate (the prompt really timed out).
             assert ans == "", f"round {i}: respond failed but got answer {ans!r}"
 
     for i in range(40):
         one_round(i)
 
-    # The invariant that matters: no round had BOTH a successful respond and
-    # a false expiry. tracking_emit recorded every expire; cross-check none
-    # collided with a successful answer. (Empty-answer expiries are fine.)
-    # Since each sid is unique we can't easily map back here, but the per-
-    # round asserts above already guarantee respond-ok ⟹ answer delivered.
     assert results["respond_ok"] > 0, "test never exercised the respond-wins path"
