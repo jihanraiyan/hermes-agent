@@ -360,7 +360,23 @@ def _request(
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             raw = resp.read().decode("utf-8")
-            return json.loads(raw) if raw.strip() else {}
+            if not raw.strip():
+                return {}
+            try:
+                return json.loads(raw)
+            except json.JSONDecodeError as exc:
+                # A 2xx with a non-JSON body means the endpoint isn't actually
+                # serving the billing API here — e.g. a reverse-proxy / SPA
+                # fallback HTML page when the route isn't deployed on this
+                # deployment. Surface it as a typed, non-auth error so callers
+                # degrade gracefully ("unavailable") instead of crashing with a
+                # raw JSONDecodeError that reads as "not logged in".
+                raise BillingError(
+                    "Billing endpoint returned a non-JSON response "
+                    "(it may not be available on this deployment).",
+                    error="endpoint_unavailable",
+                    status=getattr(resp, "status", None),
+                ) from exc
     except urllib.error.HTTPError as exc:
         # A 401 on a cached token → drop the cache and retry once with a fresh
         # (refresh-aware) resolve before surfacing the auth error.
