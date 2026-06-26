@@ -24,6 +24,7 @@ const https = require('node:https')
 const path = require('node:path')
 const { pathToFileURL } = require('node:url')
 const { execFileSync, spawn } = require('node:child_process')
+const { isThinClient } = require('./build-mode.cjs')
 const { installEmbedReferer } = require('./embed-referer.cjs')
 const { detectRemoteDisplay, isWindowsBinaryPathInWsl, isWslEnvironment } = require('./bootstrap-platform.cjs')
 const { runBootstrap } = require('./bootstrap-runner.cjs')
@@ -1839,6 +1840,17 @@ async function resolveHealedBranch(updateRoot, branch) {
 }
 
 async function checkUpdates() {
+  // Thin client: no local checkout to git-pull, no bundled updater. Updates
+  // come from the package manager (Flatpak, Snap, etc.), not in-app self-update.
+  if (isThinClient()) {
+    return {
+      supported: false,
+      reason: 'thin-client',
+      message: 'Updates are managed by your package manager. This is a thin client build.',
+      fetchedAt: Date.now()
+    }
+  }
+
   const updateRoot = resolveUpdateRoot()
   let { branch } = readDesktopUpdateConfig()
   const gitDir = path.join(updateRoot, '.git')
@@ -1972,6 +1984,10 @@ let updateInFlight = false
 // updater isn't staged (e.g. a dev/source run that never went through the
 // installer); callers degrade gracefully.
 function resolveUpdaterBinary() {
+  // Thin client: no staged Tauri updater — the packaged app is managed
+  // externally. Returning null lets the existing callers degrade gracefully
+  // (the manual-command path), though applyUpdates already short-circuits.
+  if (isThinClient()) return null
   const name = IS_WINDOWS ? 'hermes-setup.exe' : 'hermes-setup'
   const candidate = path.join(HERMES_HOME, name)
   return fileExists(candidate) ? candidate : null
@@ -2130,6 +2146,16 @@ async function releaseBackendLock(updateRoot, tag) {
 // Detection (checkUpdates / commit changelog / "N behind") stays in the UI;
 // only this apply action changed.
 async function applyUpdates(opts = {}) {
+  // Thin client: self-update is not supported. The packaged app is managed
+  // externally (Flatpak, Snap, etc.).
+  if (isThinClient()) {
+    return {
+      ok: false,
+      error: 'unsupported',
+      message: 'Self-update is not available in thin client builds. Use your package manager to update.'
+    }
+  }
+
   if (updateInFlight) {
     throw new Error('An update is already in progress.')
   }
@@ -2831,6 +2857,23 @@ function createActiveBackend(dashboardArgs) {
 }
 
 function resolveHermesBackend(dashboardArgs) {
+  // Thin client: no local backend, no bootstrap. The only valid path is a
+  // remote gateway connection. Returning the bootstrap-needed sentinel here
+  // would kick off install.ps1, which the thin build doesn't ship. Instead
+  // return a dedicated sentinel so startHermes() can produce a clear error
+  // directing the user to configure a remote gateway.
+  if (isThinClient()) {
+    return {
+      kind: 'thin-client-no-local',
+      label: 'Thin client build — remote gateway required',
+      command: null,
+      args: dashboardArgs,
+      bootstrap: false,
+      env: {},
+      shell: false
+    }
+  }
+
   // 1. Explicit override -- HERMES_DESKTOP_HERMES_ROOT points at a developer
   //    checkout. Honour it as-is (no bootstrap; the user is driving).
   const overrideRoot = process.env.HERMES_DESKTOP_HERMES_ROOT && path.resolve(process.env.HERMES_DESKTOP_HERMES_ROOT)
@@ -2974,6 +3017,19 @@ function resolveHermesBackend(dashboardArgs) {
 }
 
 async function ensureRuntime(backend) {
+  // Thin client: resolveHermesBackend returned a sentinel telling us there
+  // is no local backend to spawn. Rather than crashing on a null command
+  // spawn, throw a clear error so startHermes() catches it and the boot-
+  // failure overlay surfaces the "configure a remote gateway" message.
+  if (backend.kind === 'thin-client-no-local') {
+    const err = new Error(
+      'This is a thin client build with no bundled Hermes agent. ' +
+        'Go to Settings → Gateway and configure a remote gateway URL.'
+    )
+    err.isThinClientNoLocal = true
+    throw err
+  }
+
   if (!backend.bootstrap) {
     await advanceBootProgress('runtime.external', `Using ${backend.label}`, 32)
     return applyWindowsNoConsoleSpawnHints(backend)
@@ -4985,6 +5041,10 @@ async function testDesktopConnectionConfig(input = {}) {
     if (authMode !== 'oauth') {
       token = decryptDesktopSecret(block.token)
     }
+  } else if (isThinClient()) {
+    // Thin client: no local backend to test against. A "local" connection
+    // test is meaningless — there's no bundled agent to reach.
+    throw new Error('Local connection test is not available in thin client builds. Configure a remote gateway URL.')
   } else {
     const remote = (await resolveRemoteBackend(key)) || (await startHermes())
     baseUrl = remote.baseUrl
@@ -5399,6 +5459,17 @@ async function startHermes() {
         logs: hermesLog.slice(-80),
         ...getWindowState()
       }
+    }
+
+    // Thin client: the remote check above was the only path. If we get here,
+    // no remote was configured — refuse to spawn a local backend.
+    if (isThinClient()) {
+      const err = new Error(
+        'No remote gateway configured. This thin client build requires a remote gateway. ' +
+          'Go to Settings → Gateway to configure one.'
+      )
+      err.isThinClientNoRemote = true
+      throw err
     }
 
     // Mutual exclusion with an in-app update (#50238). If this instance was
@@ -6120,6 +6191,10 @@ ipcMain.on('hermes:pet-overlay:control', (_event, payload) => {
   mainWindow.webContents.send('hermes:pet-overlay:control', payload)
 })
 ipcMain.handle('hermes:bootstrap:reset', async () => {
+  // Thin client: no bootstrap to reset. Just reload the window.
+  if (isThinClient()) {
+    return { ok: true }
+  }
   // Renderer's "Reload and retry" path. Clear the latched failure and
   // reset connection state so the next startHermes() call restarts the
   // full backend flow (including a fresh runBootstrap pass).
@@ -6140,6 +6215,10 @@ ipcMain.handle('hermes:bootstrap:reset', async () => {
   return { ok: true }
 })
 ipcMain.handle('hermes:bootstrap:repair', async () => {
+  // Thin client: no local install to repair.
+  if (isThinClient()) {
+    return { ok: true }
+  }
   // Forceful repair: drop the bootstrap-complete marker so the next
   // startHermes() re-runs the full installer (refreshing a broken/partial
   // venv), and clear any latched failure + live connection. The renderer
@@ -7157,6 +7236,23 @@ function uninstallVenvPython() {
 }
 
 async function getUninstallSummary() {
+  // Thin client: no local agent install to uninstall. Return a minimal
+  // summary so the settings UI can show "nothing to remove" instead of
+  // probing for a venv that doesn't exist.
+  if (isThinClient()) {
+    return {
+      hermes_home: HERMES_HOME,
+      agent_installed: false,
+      gui_installed: true,
+      source_built_artifacts: [],
+      packaged_app_paths: [],
+      userdata_dir: app.getPath('userData'),
+      userdata_exists: true,
+      platform: process.platform,
+      probe: 'thin-client'
+    }
+  }
+
   const py = uninstallVenvPython()
   const agentRoot = ACTIVE_HERMES_ROOT
   // Fast JS-side fallback used when the agent venv is gone (lite client) or the
@@ -7329,6 +7425,11 @@ async function runDesktopUninstall(mode) {
 
 ipcMain.handle('hermes:uninstall:summary', async () => getUninstallSummary())
 ipcMain.handle('hermes:uninstall:run', async (_event, payload) => {
+  // Thin client: no local agent to uninstall. The packaged app is managed
+  // by the OS package manager.
+  if (isThinClient()) {
+    return { ok: false, error: 'unsupported', message: 'Uninstall is handled by your package manager in thin client builds.' }
+  }
   const mode = payload && typeof payload === 'object' ? payload.mode : payload
   return runDesktopUninstall(String(mode || ''))
 })
@@ -7421,6 +7522,7 @@ function registerDeepLinkProtocol() {
 // whole new app instead of routing into the running one.
 const _gotSingleInstanceLock = app.requestSingleInstanceLock()
 if (!_gotSingleInstanceLock) {
+  console.log("Hermes Desktop is already running, exiting.")
   app.quit()
 } else {
   app.on('second-instance', (_event, argv) => {

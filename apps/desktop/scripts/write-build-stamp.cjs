@@ -1,4 +1,4 @@
-"use strict"
+'use strict'
 
 /**
  * Writes apps/desktop/build/install-stamp.json with the git ref the desktop
@@ -17,29 +17,30 @@
  *   }
  *
  * Source preference order:
- *   1. CI env vars ($GITHUB_SHA / $GITHUB_REF_NAME) -- avoid edge cases with
+ *   1. BUILD_STAMP env var (json)
+ *   2. CI env vars ($GITHUB_SHA / $GITHUB_REF_NAME) -- avoid edge cases with
  *      shallow clones, detached HEADs, etc. in CI.
- *   2. Local `git rev-parse` against the parent repo (../..).
+ *   3. Local `git rev-parse` against the parent repo (../..).
  *
  * Dev / out-of-repo builds without git produce an explicit error rather than
  * silently writing an unstamped manifest -- the packaged app refuses to
  * bootstrap without a stamp.
  */
 
-const fs = require("fs")
-const path = require("path")
-const { execSync } = require("child_process")
+const fs = require('fs')
+const path = require('path')
+const { execSync } = require('child_process')
 
 const STAMP_SCHEMA_VERSION = 1
 
-const DESKTOP_ROOT = path.resolve(__dirname, "..")
-const REPO_ROOT = path.resolve(DESKTOP_ROOT, "..", "..")
-const OUT_DIR = path.join(DESKTOP_ROOT, "build")
-const OUT_FILE = path.join(OUT_DIR, "install-stamp.json")
+const DESKTOP_ROOT = path.resolve(__dirname, '..')
+const REPO_ROOT = path.resolve(DESKTOP_ROOT, '..', '..')
+const OUT_DIR = path.join(DESKTOP_ROOT, 'build')
+const OUT_FILE = path.join(OUT_DIR, 'install-stamp.json')
 
 function tryExec(cmd, opts) {
   try {
-    return execSync(cmd, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], ...opts }).trim()
+    return execSync(cmd, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], ...opts }).trim()
   } catch {
     return null
   }
@@ -53,52 +54,79 @@ function fromCI() {
     commit: sha,
     branch: branch,
     dirty: false, // CI builds from a checkout-of-ref by definition
-    source: "ci"
+    source: 'ci'
   }
 }
 
 function fromLocalGit() {
-  const sha = tryExec("git rev-parse HEAD", { cwd: REPO_ROOT })
+  const sha = tryExec('git rev-parse HEAD', { cwd: REPO_ROOT })
   if (!sha) return null
-  const branch = tryExec("git rev-parse --abbrev-ref HEAD", { cwd: REPO_ROOT })
+  const branch = tryExec('git rev-parse --abbrev-ref HEAD', { cwd: REPO_ROOT })
   // `git status --porcelain -uno` is empty iff tracked files match HEAD.
   // We exclude untracked files (-uno) intentionally: a developer who's
   // checked out an installer scratch dir alongside the repo shouldn't
   // poison every local build with a [DIRTY] stamp.  We DO care about
   // tracked-but-modified files because those mean the .exe content
   // differs from the commit being pinned.
-  const status = tryExec("git status --porcelain -uno", { cwd: REPO_ROOT })
+  const status = tryExec('git status --porcelain -uno', { cwd: REPO_ROOT })
   const dirty = status !== null && status.length > 0
   return {
     commit: sha,
-    branch: branch === "HEAD" ? null : branch, // detached HEAD -> null
+    branch: branch === 'HEAD' ? null : branch, // detached HEAD -> null
     dirty: dirty,
-    source: "local"
+    source: 'local'
   }
 }
 
+function fromEnv() {
+  const stamp = process.env.BUILD_STAMP
+  if (!stamp) return null
+
+  const json = JSON.parse(stamp)
+  if (json.schemaVersion !== 1) {
+    throw new Error('Schema version !== 1')
+  }
+  if (typeof json.branch !== 'string') {
+    throw new Error('Expected branch to be string')
+  }
+  if (typeof json.commit !== 'string') {
+    throw new Error('Expected commit to be string')
+  }
+  if (typeof json.builtAt !== 'string') {
+    throw new Error('Expected builtAt to be string')
+  }
+  if (typeof json.dirty !== 'boolean') {
+    throw new Error('Expected dirty to be boolean')
+  }
+  if (typeof json.source !== 'string') {
+    throw new Error('Expected source to be string')
+  }
+  
+  return json
+}
+
 function main() {
-  const stamp = fromCI() || fromLocalGit()
+  const stamp = fromEnv() || fromCI() || fromLocalGit()
   if (!stamp || !stamp.commit) {
     console.error(
-      "[write-build-stamp] ERROR: could not determine git commit.\n" +
-        "  - $GITHUB_SHA not set\n" +
-        "  - `git rev-parse HEAD` failed at " +
+      '[write-build-stamp] ERROR: could not determine git commit.\n' +
+        '  - $GITHUB_SHA not set\n' +
+        '  - `git rev-parse HEAD` failed at ' +
         REPO_ROOT +
-        "\n" +
-        "Packaged builds require a git ref to pin first-launch install.ps1\n" +
-        "against. Run from a git checkout or set $GITHUB_SHA explicitly."
+        '\n' +
+        'Packaged builds require a git ref to pin first-launch install.ps1\n' +
+        'against. Run from a git checkout or set $GITHUB_SHA explicitly.'
     )
     process.exit(1)
   }
 
   if (stamp.dirty) {
     console.warn(
-      "[write-build-stamp] WARNING: working tree is dirty.\n" +
-        "  Pinning to " +
+      '[write-build-stamp] WARNING: working tree is dirty.\n' +
+        '  Pinning to ' +
         stamp.commit.slice(0, 12) +
-        " but the packaged code may differ from that commit.\n" +
-        "  Commit your changes before publishing this build."
+        ' but the packaged code may differ from that commit.\n' +
+        '  Commit your changes before publishing this build.'
     )
   }
 
@@ -112,14 +140,14 @@ function main() {
   }
 
   fs.mkdirSync(OUT_DIR, { recursive: true })
-  fs.writeFileSync(OUT_FILE, JSON.stringify(payload, null, 2) + "\n", "utf8")
+  fs.writeFileSync(OUT_FILE, JSON.stringify(payload, null, 2) + '\n', 'utf8')
   console.log(
-    "[write-build-stamp] wrote " +
+    '[write-build-stamp] wrote ' +
       path.relative(REPO_ROOT, OUT_FILE) +
-      " -> " +
+      ' -> ' +
       stamp.commit.slice(0, 12) +
-      (stamp.branch ? " (" + stamp.branch + ")" : "") +
-      (stamp.dirty ? " [DIRTY]" : "")
+      (stamp.branch ? ' (' + stamp.branch + ')' : '') +
+      (stamp.dirty ? ' [DIRTY]' : '')
   )
 }
 

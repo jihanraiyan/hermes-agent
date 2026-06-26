@@ -11,8 +11,6 @@
 # root to update the lockfile, then `npm ci` if the lockfile changed.
 {
   pkgs,
-  npm-lockfile-fix,
-  nodejs,
 }:
 let
   # The workspace root — where the single package-lock.json lives.
@@ -23,17 +21,19 @@ let
   # lockfile is the single source of truth — no separate dependency hash to
   # keep in sync with it.
   npmDeps = pkgs.importNpmLock.importNpmLock { npmRoot = src; };
+  nodejs = pkgs.nodejs_22;
 in
 {
+  inherit nodejs;
+
   # Returns a buildNpmPackage-compatible attrs set that provides:
   #   src, npmDeps, npmRoot      — workspace source + importNpmLock dep set
   #   npmConfigHook              — importNpmLock's offline `npm install` hook
-  #   nativeBuildInputs          — [ updateLockfileScript ] (list, prepend with ++ for more)
   #   passthru.packageJsonPath   — relative path to this workspace's package.json
   #   nodejs                     — fixed nodejs version for all packages we use in the repo
   #
   # Usage:
-  #   npm = hermesNpmLib.mkNpmPassthru { folder = "ui-tui"; attr = "tui"; pname = "hermes-tui"; };
+  #   npm = hermesNpmLib.mkNpmPassthru { folder = "ui-tui"; pname = "hermes-tui"; };
   #   pkgs.buildNpmPackage (npm // {
   #     sourceRoot = "ui-tui";
   #     buildPhase = '' ... '';
@@ -42,7 +42,6 @@ in
   mkNpmPassthru =
     {
       folder, # repo-relative folder with package.json, e.g. "ui-tui"
-      attr, # flake package attr, e.g. "tui"
       ...
     }:
     let
@@ -60,24 +59,6 @@ in
       npmRoot = ".";
 
       ELECTRON_SKIP_BINARY_DOWNLOAD = 1;
-
-      nativeBuildInputs = [
-        (pkgs.writeShellScriptBin "update_${attr}_lockfile" ''
-          set -euox pipefail
-
-          REPO_ROOT=$(git rev-parse --show-toplevel)
-
-          # All workspace packages share the root lockfile.
-          cd "$REPO_ROOT"
-          rm -rf node_modules/
-          ${pkgs.lib.getExe' nodejs "npm"} cache clean --force
-          CI=true ${pkgs.lib.getExe' nodejs "npm"} install --workspaces
-          ${pkgs.lib.getExe npm-lockfile-fix} ./package-lock.json
-
-          nix build .#${attr}
-          echo "Lockfile updated and build verified for .#${attr}"
-        '')
-      ];
 
       passthru = {
         packageJsonPath = "${folder}/package.json";

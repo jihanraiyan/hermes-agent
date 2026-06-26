@@ -10,13 +10,14 @@
   makeWrapper,
   callPackage,
   python312,
-  nodejs_22,
-  electron,
   ripgrep,
   git,
   openssh,
   ffmpeg,
   tirith,
+
+  # for building stuff w/ consistent node versions
+  hermesNpmLib,
 
   # linux-only deps
   wl-clipboard,
@@ -26,7 +27,6 @@
   uv2nix,
   pyproject-nix,
   pyproject-build-systems,
-  npm-lockfile-fix,
   # Locked git revision of the flake source — embedded so banner.py can
   # check for updates without needing a local .git directory. Null for
   # impure / dirty builds where flakes can't determine a rev.
@@ -36,14 +36,9 @@
   extraDependencyGroups ? [ ],
 }:
 let
-  nodejs = nodejs_22;
   hermesVenv = callPackage ./python.nix {
     inherit uv2nix pyproject-nix pyproject-build-systems;
     dependency-groups = [ "all" ] ++ extraDependencyGroups;
-  };
-
-  hermesNpmLib = callPackage ./lib.nix {
-    inherit npm-lockfile-fix nodejs;
   };
 
   hermesTui = callPackage ./tui.nix {
@@ -83,7 +78,7 @@ let
   bundledLocales = lib.cleanSource ../locales;
 
   runtimeDeps = [
-    nodejs
+    hermesNpmLib.nodejs
     ripgrep
     git
     openssh
@@ -182,7 +177,7 @@ stdenv.mkDerivation (finalAttrs: {
           --set HERMES_WEB_DIST $out/share/hermes-agent/web_dist \
           --set HERMES_TUI_DIR $out/ui-tui \
           --set HERMES_PYTHON ${hermesVenv}/bin/python3 \
-          --set HERMES_NODE ${lib.getExe nodejs} \
+          --set HERMES_NODE ${lib.getExe hermesNpmLib.nodejs} \
           ${lib.optionalString (rev != null) ''--set HERMES_REVISION ${rev} \''}
           ${lib.optionalString (extraPythonPackages != [ ]) ''--suffix PYTHONPATH : "${pythonPath}"''}
       '')
@@ -204,23 +199,9 @@ stdenv.mkDerivation (finalAttrs: {
 
   passthru = {
     inherit
-      hermesTui
-      hermesWeb
       hermesNpmLib
       hermesVenv
       ;
-
-    # `hermesDesktop` references `finalAttrs.finalPackage` (this whole
-    # derivation, after all overrides are applied) so the desktop wrapper
-    # can prepend its `/bin` to PATH.  The desktop's resolver step 4
-    # ("existing hermes on PATH") then picks up the fully wrapped
-    # `hermes` binary — venv with all deps, bundled skills/plugins,
-    # runtime PATH (ripgrep/git/ffmpeg/etc).  No re-implementation
-    # of the agent resolution in the desktop wrapper.
-    hermesDesktop = callPackage ./desktop.nix {
-      inherit hermesNpmLib electron;
-      hermesAgent = finalAttrs.finalPackage;
-    };
 
     devShellHook = ''
       STAMP=".nix-stamps/hermes-agent"

@@ -16,6 +16,11 @@ const root = resolve(here, '..')
 const entry = resolve(root, 'electron/main.cjs')
 const tmp = resolve(root, 'electron/main.bundled.cjs')
 
+// Thin-client builds strip bootstrap, local backend, and self-update.
+// Bake the flag into the bundle so build-mode.cjs's process.env read resolves
+// to a string literal at runtime (no env var needed in the packaged app).
+const thinClient = process.env.HERMES_DESKTOP_BUILD_MODE === 'thin'
+
 await build({
   entryPoints: [entry],
   bundle: true,
@@ -24,6 +29,9 @@ await build({
   target: 'node20',
   outfile: tmp,
   external: ['electron', 'node-pty'],
+  define: {
+    'process.env.HERMES_DESKTOP_BUILD_MODE': JSON.stringify(thinClient ? 'thin' : '')
+  },
   logLevel: 'info'
 })
 

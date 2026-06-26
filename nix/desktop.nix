@@ -13,26 +13,30 @@
   makeWrapper,
   hermesNpmLib,
   electron,
-  hermesAgent,
+  hermesAgent ? null,
   ...
 }:
 let
   npm = hermesNpmLib.mkNpmPassthru {
     folder = "apps/desktop";
-    attr = "desktop";
     pname = "hermes-desktop";
   };
 
   packageJson = builtins.fromJSON (builtins.readFile (npm.src + "/apps/desktop/package.json"));
   version = packageJson.version;
 
-  # Build the renderer (dist/ + electron/ + package.json).
+  isThinClient = hermesAgent == null;
+
+  # Build the renderqer (dist/ + electron/ + package.json).
   renderer = pkgs.buildNpmPackage (
     npm
     // {
       pname = "hermes-desktop-renderer";
       inherit version;
       doCheck = true;
+
+      HERMES_DESKTOP_BUILD_MODE = if isThinClient then "thin" else "";
+      BUILD_STAMP = ''{"schemaVersion":1,"commit":"nix","branch":"nix","dirty":false,"source":"nix","builtAt":"0"}'';
 
       buildPhase = ''
         runHook preBuild
@@ -41,7 +45,6 @@ let
         # at first-launch to pin the install.ps1 git ref; informational in
         # nix builds (the backend comes from the derivation directly).
         mkdir -p apps/desktop/build
-        echo '{"schemaVersion":1,"commit":"nix","branch":"nix","dirty":false,"source":"nix"}' > apps/desktop/build/install-stamp.json
 
         # patch shebangs in node_modules/.bin so npm exec can find the
         # nix-store equivalents of /usr/bin/env (which doesn't exist in the sandbox)
@@ -50,18 +53,7 @@ let
         pushd apps/desktop
           # stage node-pty native binaries into build/native-deps for the final nix output
           npm rebuild node-pty --build-from-source
-          node scripts/stage-native-deps.cjs
-          
-          npm exec tsc -b
-          npm exec vite build
-
-          # Bundle the electron main into a single self-contained file so
-          # the nix output doesn't need node_modules/.  simple-git (the only
-          # external runtime dep of the electron main) gets inlined; electron
-          # and node-pty are external (provided by the runtime / native-deps).
-          # preload.cjs stays separate — Electron loads it via __dirname, not
-          # require(), so it must remain a standalone file.
-          node scripts/bundle-electron-main.mjs
+          npm run build
         popd
 
         runHook postBuild
@@ -71,8 +63,6 @@ let
         runHook preCheck
 
         pushd apps/desktop
-
-          npm run postbuild
 
           # validate staged node-pty native binary is present
           STAGED_PTY_NODE="./build/native-deps/node-pty/build/Release/pty.node"
@@ -131,15 +121,15 @@ stdenv.mkDerivation {
     substituteInPlace $out/share/hermes-desktop/electron/main.cjs \
       --replace-fail "process.resourcesPath" "'$out/share/hermes-desktop'"
 
-    # Wrap the nixpkgs electron binary to launch our app.  Set
-    # HERMES_DESKTOP_HERMES to the absolute path of the nix-built `hermes`
-    # binary so the desktop's resolver step 4 ("existing Hermes CLI on
-    # PATH") uses our fully wrapped binary — venv with all deps,
+    # Wrap the nixpkgs electron binary to launch our app.
+    # If we're building thick, set HERMES_DESKTOP_HERMES to the absolute path of the
+    # nix-built `hermes` binary so the desktop's resolver step 4
+    # ("existing Hermes CLI on PATH") uses our fully wrapped binary & venv with all deps,
     # bundled skills/plugins, runtime PATH (ripgrep/git/ffmpeg/etc).
-    # No reimplementation of the agent resolver in the wrapper.
+
     makeWrapper ${lib.getExe electron} $out/bin/hermes-desktop \
       --add-flags "$out/share/hermes-desktop" \
-      --set HERMES_DESKTOP_HERMES "${lib.getExe hermesAgent}" \
+      ${if isThinClient then "" else ''--set HERMES_DESKTOP_HERMES "${lib.getExe hermesAgent}"''}\
       --set ELECTRON_IS_DEV 0
 
     runHook postInstall

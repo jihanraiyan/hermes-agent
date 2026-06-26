@@ -2,14 +2,33 @@
 { inputs, ... }:
 {
   perSystem =
-    { pkgs, lib, inputs', ... }:
+    {
+      pkgs,
+      lib,
+      ...
+    }:
     let
+      hermesNpmLib = pkgs.callPackage ./lib.nix { };
       hermesAgent = pkgs.callPackage ./hermes-agent.nix {
-        inherit (inputs) uv2nix pyproject-nix pyproject-build-systems;
-        npm-lockfile-fix = inputs'.npm-lockfile-fix.packages.default;
-        # Only embed clean revs — dirtyRev doesn't represent any upstream
+        inherit (inputs)
+          uv2nix
+          pyproject-nix
+          pyproject-build-systems
+          ;
+        inherit
+          hermesNpmLib
+          ;
+
+        # Only embed clean revs. dirtyRev doesn't represent any upstream
         # commit, so comparing it would always claim "update available".
         rev = inputs.self.rev or null;
+      };
+
+      desktop = pkgs.callPackage ./desktop.nix {
+        inherit hermesAgent hermesNpmLib;
+      };
+      desktop-thin = pkgs.callPackage ./desktop.nix {
+        inherit hermesNpmLib;
       };
     in
     {
@@ -44,12 +63,11 @@
             "parallel-web"
             "tts-premium"
             "voice"
-          ] ++ lib.optionals pkgs.stdenv.isLinux [ "matrix" ];
+          ]
+          ++ lib.optionals pkgs.stdenv.isLinux [ "matrix" ];
         };
 
-        tui = hermesAgent.hermesTui;
-        web = hermesAgent.hermesWeb;
-        desktop = hermesAgent.hermesDesktop;
+        inherit desktop desktop-thin;
       };
     };
 }

@@ -5,6 +5,7 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import type { DesktopAuthProvider, DesktopConnectionProbeResult } from '@/global'
 import { useI18n } from '@/i18n'
+import { isThinClient } from '@/lib/build-mode'
 import { AlertCircle, Check, FileText, Globe, Loader2, LogIn, Monitor } from '@/lib/icons'
 import { cn } from '@/lib/utils'
 import { notify, notifyError } from '@/store/notifications'
@@ -466,16 +467,18 @@ export function GatewaySettings() {
       ) : null}
 
       <div className="grid gap-3 sm:grid-cols-2">
+        {isThinClient() ? null : (
+          <ModeCard
+            active={state.mode === 'local'}
+            description={g.localDesc}
+            disabled={state.envOverride}
+            icon={Monitor}
+            onSelect={() => setState(current => ({ ...current, mode: 'local' }))}
+            title={g.localTitle}
+          />
+        )}
         <ModeCard
-          active={state.mode === 'local'}
-          description={g.localDesc}
-          disabled={state.envOverride}
-          icon={Monitor}
-          onSelect={() => setState(current => ({ ...current, mode: 'local' }))}
-          title={g.localTitle}
-        />
-        <ModeCard
-          active={state.mode === 'remote'}
+          active={state.mode === 'remote' || isThinClient()}
           description={g.remoteDesc}
           disabled={state.envOverride}
           icon={Globe}

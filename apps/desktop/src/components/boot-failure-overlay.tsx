@@ -6,6 +6,7 @@ import { ErrorIcon } from '@/components/ui/error-state'
 import { LogView } from '@/components/ui/log-view'
 import type { DesktopConnectionConfig } from '@/global'
 import { useI18n } from '@/i18n'
+import { isThinClient } from '@/lib/build-mode'
 import { FileText, Loader2, LogIn, RefreshCw, Wrench } from '@/lib/icons'
 import { $desktopBoot } from '@/store/boot'
 import { notify, notifyError } from '@/store/notifications'
@@ -205,16 +206,18 @@ export function BootFailureOverlay() {
                   {copy.retry}
                 </Button>
               )}
-              {!remoteReauth ? (
+              {remoteReauth ? null : !isThinClient() ? (
                 <Button disabled={Boolean(busy)} onClick={() => void repair()} variant="secondary">
                   {busy === 'repair' ? <Loader2 className="animate-spin" /> : <Wrench />}
                   {copy.repairInstall}
                 </Button>
               ) : null}
-              <Button disabled={Boolean(busy)} onClick={() => void switchToLocalGateway()} variant="secondary">
-                {busy === 'local' ? <Loader2 className="animate-spin" /> : null}
-                {copy.useLocalGateway}
-              </Button>
+              {isThinClient() ? null : (
+                <Button disabled={Boolean(busy)} onClick={() => void switchToLocalGateway()} variant="secondary">
+                  {busy === 'local' ? <Loader2 className="animate-spin" /> : null}
+                  {copy.useLocalGateway}
+                </Button>
+              )}
               <Button onClick={openLogs} variant="ghost">
                 <FileText />
                 {copy.openLogs}

@@ -14,6 +14,7 @@ import type {
   DesktopVersionInfo
 } from '@/global'
 import { checkHermesUpdate, getActionStatus, updateHermes } from '@/hermes'
+import { isThinClient } from '@/lib/build-mode'
 import { translateNow } from '@/i18n'
 import { persistString, storedString } from '@/lib/storage'
 import { dismissNotification, notify } from '@/store/notifications'
@@ -194,7 +195,8 @@ export function maybeNotifyUpdateAvailable(status: DesktopUpdateStatus | null) {
 }
 
 export function openUpdatesWindow(): void {
-  openUpdateOverlayFor(isRemoteMode() ? 'backend' : 'client')
+  // Thin client: no client self-update — always target the backend (remote).
+  openUpdateOverlayFor(isThinClient() || isRemoteMode() ? 'backend' : 'client')
 }
 
 /**
@@ -205,7 +207,7 @@ export function openUpdatesWindow(): void {
  * only be able to open the changelog overlay.
  */
 export function startActiveUpdate(): void {
-  const target: UpdateTarget = isRemoteMode() ? 'backend' : 'client'
+  const target: UpdateTarget = isThinClient() || isRemoteMode() ? 'backend' : 'client'
   $updateOverlayTarget.set(target)
   $updateOverlayOpen.set(true)
   void (target === 'backend' ? applyBackendUpdate() : applyUpdates())
@@ -611,9 +613,18 @@ export function startUpdatePoller(): void {
   }
 
   pollerStarted = true
+
+  // Thin client: no client self-update, but still poll for backend updates
+  // (the remote gateway may have new versions available).
+  if (!isThinClient()) {
+    void checkUpdates()
+  }
   void checkBackendUpdates()
   void refreshDesktopVersion()
-  bridge.onProgress(ingestProgress)
+
+  if (!isThinClient()) {
+    bridge.onProgress(ingestProgress)
+  }
 
   // The poller starts at mount, before the gateway connects — so the first
   // backend check above sees mode≠remote and no-ops. Re-check once the

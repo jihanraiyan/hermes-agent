@@ -3,8 +3,16 @@ import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 import path from 'path'
 
+// Thin-client builds strip bootstrap, local backend, and self-update so the
+// app connects ONLY to a remote gateway. Set HERMES_DESKTOP_BUILD_MODE=thin
+// at build time; the renderer reads the baked-in VITE_THIN_CLIENT constant.
+const THIN_CLIENT = process.env.HERMES_DESKTOP_BUILD_MODE === 'thin'
+
 export default defineConfig({
   base: './',
+  define: {
+    __VITE_THIN_CLIENT__: JSON.stringify(THIN_CLIENT)
+  },
   plugins: [react(), tailwindcss()],
   css: {
     // Pin an explicit (empty) PostCSS config. Tailwind is handled entirely by
