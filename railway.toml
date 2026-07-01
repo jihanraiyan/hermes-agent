@@ -11,11 +11,12 @@ dockerfilePath = "Dockerfile"
 # Setting a Railway startCommand would wrap it in `sh -c`, breaking main-wrapper's
 # arg routing (it would try to exec `gateway` directly, which isn't on PATH).
 #
-# Pin the model on the (persistent, initially-empty) volume before each start by
-# seeding config.yaml from the copy baked into the image. This forces native
-# Anthropic + claude-sonnet-4-6 (otherwise the gateway defaults provider to
-# `auto`/OpenRouter). Secrets stay in env; this file only pins model + platform.
-preDeployCommand = "cp /opt/hermes/deploy/config.yaml /opt/data/config.yaml"
+# No preDeployCommand: nothing is auto-written to the /opt/data volume on deploy,
+# so the agent's config.yaml, memories, sessions, and skills are never overwritten.
+# The claude-sonnet-4-6 model pin lives on the volume (config.yaml) and persists
+# on its own. To change the model later: upload a new config.yaml to the volume
+# (`railway volume files upload ... config.yaml --overwrite`) then `railway redeploy`.
+#
 # The gateway's HTTP listener (Sendblue webhook, bound to $PORT) serves /health.
 healthcheckPath = "/health"
 healthcheckTimeout = 300
