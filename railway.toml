@@ -1,0 +1,14 @@
+# Railway deploy config for the Sendblue iMessage gateway.
+# The image ENTRYPOINT (/init -> docker/main-wrapper.sh) is kept; startCommand
+# becomes the CMD, so main-wrapper runs `hermes gateway run`.
+
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+startCommand = "gateway run"
+healthcheckPath = "/health"
+healthcheckTimeout = 300
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 10
