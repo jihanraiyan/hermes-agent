@@ -207,9 +207,15 @@ COPY --link --chmod=a+rX,go-w . .
 # resolution or downloads.
 RUN uv pip install --no-cache-dir --no-deps -e "."
 
-# Keyless web_search backend: ddgs (DuckDuckGo). Lazy-installs are disabled in
-# this image (HERMES_DISABLE_LAZY_INSTALLS=1), so bake it in for web.backend=ddgs.
-RUN uv pip install --no-cache-dir ddgs
+# Lazy-installs are disabled in this image (HERMES_DISABLE_LAZY_INSTALLS=1), so
+# bake in optional runtime deps our enabled skills need:
+#  - ddgs: keyless web_search backend (web.backend=ddgs)
+#  - google-*: the google-workspace skill (Gmail, Calendar, Drive, Sheets, Docs)
+RUN uv pip install --no-cache-dir \
+      ddgs \
+      google-api-python-client \
+      google-auth-oauthlib \
+      google-auth-httplib2
 
 # Wire the exec shim and install-method stamp.  Files under /opt/hermes are
 # already root-owned (COPY, uv sync, npm install all run as root) and
