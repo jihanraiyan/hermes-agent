@@ -7,9 +7,10 @@ builder = "DOCKERFILE"
 dockerfilePath = "Dockerfile"
 
 [deploy]
-startCommand = "gateway run"
-# No healthcheck: the gateway's HTTP listener is the Sendblue webhook (bound to
-# $PORT). We verify /health via the public domain after deploy. Re-add
-# healthcheckPath = "/health" once the port/routing is confirmed.
+# No startCommand: the image's CMD (["gateway","run"]) runs via the ENTRYPOINT.
+# Setting a Railway startCommand would wrap it in `sh -c`, breaking main-wrapper's
+# arg routing (it would try to exec `gateway` directly, which isn't on PATH).
+# No healthcheck yet: the gateway's HTTP listener IS the Sendblue webhook (bound
+# to $PORT); we verify /health via the public domain after deploy.
 restartPolicyType = "ON_FAILURE"
 restartPolicyMaxRetries = 10

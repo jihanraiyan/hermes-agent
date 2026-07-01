@@ -361,4 +361,7 @@ RUN mkdir -p /opt/data
 # exit code. Without the wrapper-as-ENTRYPOINT, leading-dash args
 # like `--version` would be intercepted by /init's POSIX shell.
 ENTRYPOINT [ "/init", "/opt/hermes/docker/main-wrapper.sh" ]
-CMD [ ]
+# Default to running the messaging gateway (main-wrapper turns this into
+# `hermes gateway run`). Baked into CMD so PaaS platforms (Railway) run it via
+# the ENTRYPOINT instead of wrapping it in `sh -c`, which would break arg routing.
+CMD [ "gateway", "run" ]
