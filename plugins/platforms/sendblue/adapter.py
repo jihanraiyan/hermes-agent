@@ -97,10 +97,13 @@ class SendblueAdapter(BasePlatformAdapter):
         self._webhook_host = _extra_or_env(
             extra, "webhook_host", "SENDBLUE_WEBHOOK_HOST", DEFAULT_WEBHOOK_HOST
         )
+        # Port precedence: explicit config/env → Railway's injected $PORT → default.
+        # Binding $PORT lets Railway (and similar PaaS) route + health-check the
+        # webhook automatically without a hardcoded port.
         self._webhook_port = int(
-            _extra_or_env(
-                extra, "webhook_port", "SENDBLUE_WEBHOOK_PORT", str(DEFAULT_WEBHOOK_PORT)
-            )
+            _extra_or_env(extra, "webhook_port", "SENDBLUE_WEBHOOK_PORT", "")
+            or os.getenv("PORT", "")
+            or str(DEFAULT_WEBHOOK_PORT)
         )
         self._webhook_path = _extra_or_env(
             extra, "webhook_path", "SENDBLUE_WEBHOOK_PATH", DEFAULT_WEBHOOK_PATH
