@@ -1,0 +1,20 @@
+# Hermes headless config for the Sendblue iMessage deploy.
+#
+# Seed this to $HERMES_HOME/config.yaml — that's /opt/data/config.yaml in the
+# Docker image / Railway volume (HERMES_HOME=/opt/data, set by the Dockerfile).
+#
+# Secrets (ANTHROPIC_API_KEY, SENDBLUE_*) come from environment variables / .env,
+# NOT this file. The Sendblue platform also auto-enables from those env vars via
+# the plugin's env_enablement_fn, so this file mainly pins the model.
+#
+# Provider is auto-detected from ANTHROPIC_API_KEY. Without model.default the
+# gateway falls back to a default Claude model; we pin Sonnet 4.6 explicitly.
+
+model:
+  provider: anthropic
+  default: claude-sonnet-4-6
+
+platforms:
+  sendblue:
+    enabled: true
+    typing_indicator: true

@@ -1,0 +1,56 @@
+name: sendblue-platform
+label: Sendblue (iMessage)
+kind: platform
+version: 1.0.0
+description: >
+  Sendblue iMessage gateway adapter for Hermes Agent. Runs an aiohttp webhook
+  server that receives inbound iMessage/SMS/RCS messages from the Sendblue REST
+  API and relays them to the Hermes agent, sending replies back via
+  /api/send-message. Falls back iMessage -> RCS -> SMS automatically. Markdown is
+  stripped to plain text since iMessage renders it literally.
+author: Hermes Agent contributors
+# ``requires_env`` and ``optional_env`` entries are surfaced in the
+# ``hermes config`` UI via the platform-plugin env var injector.
+requires_env:
+  - name: SENDBLUE_API_KEY_ID
+    description: "Sendblue API Key ID (dashboard, or `sendblue show-keys`)"
+    prompt: "Sendblue API Key ID"
+    url: "https://sendblue.com/"
+    password: true
+  - name: SENDBLUE_API_SECRET_KEY
+    description: "Sendblue API Secret Key (dashboard, or `sendblue show-keys`)"
+    prompt: "Sendblue API Secret Key"
+    password: true
+  - name: SENDBLUE_NUMBER
+    description: "Your assigned Sendblue number in E.164 (`sendblue lines`)"
+    prompt: "Sendblue from-number (E.164)"
+    password: false
+optional_env:
+  - name: SENDBLUE_WEBHOOK_HOST
+    description: "Webhook bind host (default: 0.0.0.0)"
+    prompt: "Webhook host"
+    password: false
+  - name: SENDBLUE_WEBHOOK_PORT
+    description: "Webhook listen port (default: 8646; set to ${PORT} on Railway)"
+    prompt: "Webhook port"
+    password: false
+  - name: SENDBLUE_WEBHOOK_PATH
+    description: "Webhook path (default: /sendblue-webhook)"
+    prompt: "Webhook path"
+    password: false
+  - name: SENDBLUE_WEBHOOK_TOKEN
+    description: "Shared secret required as ?token= on the webhook URL (Sendblue does not sign requests — set this and register the URL with ?token=...)"
+    prompt: "Webhook shared secret"
+    password: true
+  - name: SENDBLUE_ALLOWED_USERS
+    description: "Comma-separated E.164 phone numbers allowed to talk to the bot"
+    prompt: "Allowed users (comma-separated)"
+    password: false
+  - name: SENDBLUE_ALLOW_ALL_USERS
+    description: "Allow any number to talk to the bot (dev only — disables allowlist)"
+    prompt: "Allow all users? (true/false)"
+    password: false
+  - name: SENDBLUE_HOME_CHANNEL
+    description: "Default phone number for cron / notification delivery"
+    prompt: "Home number (E.164, or empty)"
+    password: false
