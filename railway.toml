@@ -10,7 +10,14 @@ dockerfilePath = "Dockerfile"
 # No startCommand: the image's CMD (["gateway","run"]) runs via the ENTRYPOINT.
 # Setting a Railway startCommand would wrap it in `sh -c`, breaking main-wrapper's
 # arg routing (it would try to exec `gateway` directly, which isn't on PATH).
-# No healthcheck yet: the gateway's HTTP listener IS the Sendblue webhook (bound
-# to $PORT); we verify /health via the public domain after deploy.
+#
+# Pin the model on the (persistent, initially-empty) volume before each start by
+# seeding config.yaml from the copy baked into the image. This forces native
+# Anthropic + claude-sonnet-4-6 (otherwise the gateway defaults provider to
+# `auto`/OpenRouter). Secrets stay in env; this file only pins model + platform.
+preDeployCommand = "cp /opt/hermes/deploy/config.yaml /opt/data/config.yaml"
+# The gateway's HTTP listener (Sendblue webhook, bound to $PORT) serves /health.
+healthcheckPath = "/health"
+healthcheckTimeout = 300
 restartPolicyType = "ON_FAILURE"
 restartPolicyMaxRetries = 10
