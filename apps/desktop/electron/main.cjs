@@ -5124,7 +5124,16 @@ function coerceDesktopConnectionConfig(input = {}, existing = readDesktopConnect
   const remoteLike = modeIsRemoteLike(mode)
 
   // The block being edited: a per-profile entry or the global remote block.
-  const existingBlock = key ? existing.profiles?.[key] || {} : existing.remote || {}
+  const rawExistingBlock = key ? existing.profiles?.[key] || {} : existing.remote || {}
+  // Leaving a CLOUD connection unselects it: a cloud block's url/org/token
+  // describe a discovered Hermes Cloud instance, NOT a user-owned remote gateway,
+  // so switching to local or remote must NOT inherit them (otherwise the stale
+  // cloud URL lingers and re-selecting Cloud looks "already connected"). When the
+  // saved block was cloud and the new mode is not cloud, start from an empty
+  // block. (remote↔local toggles still preserve a real remote URL as before.)
+  const existingMode = key ? existing.profiles?.[key]?.mode : existing.mode
+  const leavingCloud = existingMode === 'cloud' && mode !== 'cloud'
+  const existingBlock = leavingCloud ? {} : rawExistingBlock
   const remoteUrl = String(input.remoteUrl ?? existingBlock.url ?? '').trim()
   // authMode: explicit input wins; otherwise inherit the saved value, default 'token'.
   const authMode = resolveAuthMode(input.remoteAuthMode, existingBlock.authMode)

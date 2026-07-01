@@ -128,7 +128,19 @@ export function GatewaySettings() {
   // list here and show a picker. `cloudOrg` is the chosen org slug/id (null =
   // not yet chosen / single-org user).
   const [cloudOrgs, setCloudOrgs] = useState<DesktopCloudOrg[]>([])
-  const [cloudOrg, setCloudOrg] = useState<null | string>(null)
+  const [cloudOrg, setCloudOrgState] = useState<null | string>(null)
+  // Mirror the selected org into a ref so connect reads the CURRENT value, not a
+  // value captured in a stale render closure. discoverCloud() resolves the org
+  // asynchronously (from the NAS response) and a user can click Connect in the
+  // same render tick; without the ref, connectCloudAgent could persist a null
+  // org even though discovery just resolved one. Always set both together.
+  const cloudOrgRef = useRef<null | string>(null)
+
+  const setCloudOrg = (value: null | string) => {
+    cloudOrgRef.current = value
+    setCloudOrgState(value)
+  }
+
   // Hermes Cloud is beta-gated: the selector ModeCard only appears when the main
   // process reports the BETA env flag is enabled. Default hidden until the async
   // check resolves, so it never flashes in for non-beta users.
@@ -512,6 +524,16 @@ export function GatewaySettings() {
     void discoverCloud(ref)
   }
 
+  // "Change org": clear the selected org and re-discover with no org arg. A
+  // multi-org user gets NAS's 409 → the picker; a single-org user auto-resolves
+  // back to their one org. Also clear the agent list so the current org's
+  // agents don't linger under the picker while discovery re-runs.
+  const changeCloudOrg = () => {
+    setCloudOrg(null)
+    setCloudAgents([])
+    void discoverCloud()
+  }
+
   // On entering cloud mode (or scope change), read the portal session status and
   // auto-discover when already signed in, so the picker is populated on open.
   useEffect(() => {
@@ -642,12 +664,14 @@ export function GatewaySettings() {
 
       // Persist a cloud-mode connection (remote-shaped, oauth) and reconnect.
       // Include the selected org so Settings reopens into the same org + instance.
+      // Read the REF (not the cloudOrg state) so a just-resolved org from
+      // discovery in this same render tick is captured, not a stale null.
       const next = await desktop.applyConnectionConfig({
         mode: 'cloud',
         profile: scope ?? undefined,
         remoteAuthMode: 'oauth',
         remoteUrl: agent.dashboardUrl,
-        cloudOrg: cloudOrg ?? undefined
+        cloudOrg: cloudOrgRef.current ?? undefined
       })
 
       setState(next)
@@ -837,9 +861,15 @@ export function GatewaySettings() {
                   {g.cloudAgentsTitle}
                 </div>
                 <div className="flex items-center gap-2">
-                  {cloudOrgs.length > 1 ? (
-                    // Let a multi-org user switch back to the org picker.
-                    <Button onClick={() => setCloudOrg(null)} size="sm" variant="text">
+                  {cloudOrg ? (
+                    // Let the user switch orgs. Gating on cloudOrgs.length would
+                    // hide this after a restore-open (which discovers straight
+                    // into the saved org and never populates the org list). So
+                    // show it whenever an org is selected: clicking clears the
+                    // org and re-runs discovery with no org arg — a multi-org
+                    // user gets the picker (NAS 409), a single-org user simply
+                    // auto-resolves back to their one org (harmless).
+                    <Button onClick={() => changeCloudOrg()} size="sm" variant="text">
                       {g.cloudOrgChange}
                     </Button>
                   ) : null}
