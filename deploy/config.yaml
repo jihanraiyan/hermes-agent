@@ -18,3 +18,8 @@ platforms:
   sendblue:
     enabled: true
     typing_indicator: true
+
+# Fast one-shot web search + extraction. ddgs (DuckDuckGo) is keyless and baked
+# into the image. Browser tools + curl work regardless; this adds web_search.
+web:
+  backend: ddgs
