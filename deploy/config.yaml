@@ -30,3 +30,8 @@ web:
 terminal:
   cwd: /opt/data/workspace
   home_mode: auto
+  # Pass HERMES_HOME through to tool subprocesses so skills (e.g. google-workspace)
+  # resolve their credential files under /opt/data instead of ~/.hermes. Creds are
+  # also mirrored to ~/.hermes as a fallback.
+  env_passthrough:
+    - HERMES_HOME
