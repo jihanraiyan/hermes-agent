@@ -23,3 +23,10 @@ platforms:
 # into the image. Browser tools + curl work regardless; this adds web_search.
 web:
   backend: ddgs
+
+# Run the agent's shell in its durable workspace on the persistent volume, so
+# anything it clones/builds/writes survives redeploys (the rest of the container
+# filesystem is ephemeral; only /opt/data persists). HOME also stays on the volume.
+terminal:
+  cwd: /opt/data/workspace
+  home_mode: auto
