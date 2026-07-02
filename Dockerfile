@@ -217,6 +217,22 @@ RUN uv pip install --no-cache-dir \
       google-auth-oauthlib \
       google-auth-httplib2
 
+# GitHub CLI (gh) + a system git credential helper, so the github skills, plain
+# git push over HTTPS, and gh commands all authenticate from the GITHUB_TOKEN
+# env var (gh auth git-credential reads GH_TOKEN/GITHUB_TOKEN). No token on disk.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends curl ca-certificates \
+ && mkdir -p -m 755 /etc/apt/keyrings \
+ && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+      -o /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+ && chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+ && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+      > /etc/apt/sources.list.d/github-cli.list \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends gh \
+ && git config --system credential."https://github.com".helper '!gh auth git-credential' \
+ && rm -rf /var/lib/apt/lists/*
+
 # Wire the exec shim and install-method stamp.  Files under /opt/hermes are
 # already root-owned (COPY, uv sync, npm install all run as root) and
 # read-only for the hermes user (go-w from the --chmod above).
