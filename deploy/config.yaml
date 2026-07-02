@@ -30,8 +30,10 @@ web:
 terminal:
   cwd: /opt/data/workspace
   home_mode: auto
-  # Pass HERMES_HOME through to tool subprocesses so skills (e.g. google-workspace)
-  # resolve their credential files under /opt/data instead of ~/.hermes. Creds are
-  # also mirrored to ~/.hermes as a fallback.
+  # Pass these through to tool subprocesses (the terminal tool strips env by
+  # default). HERMES_HOME: so skills resolve credential files under /opt/data.
+  # GITHUB_TOKEN: so gh + git + the github skills authenticate (token is a
+  # Railway env var, not on disk).
   env_passthrough:
     - HERMES_HOME
+    - GITHUB_TOKEN
