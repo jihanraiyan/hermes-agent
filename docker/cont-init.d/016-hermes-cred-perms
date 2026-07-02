@@ -1,0 +1,25 @@
+#!/command/with-contenv sh
+# Own credential files to the hermes runtime user on every boot.
+#
+# Credential files added to the /opt/data volume out-of-band (e.g. via
+# `railway volume files upload`) land owned by the uploading process (root),
+# not hermes. The stage2 first-boot chown is gated on top-level ownership and
+# skips them on subsequent boots, so hermes can't rewrite them. That breaks:
+#   - Google token refresh (google-workspace rewrites google_token.json on
+#     access-token expiry -> EACCES when root-owned)
+#   - file-based gh/git credentials the tool subprocess reads
+#
+# Runs as root (cont-init, before the s6 privilege drop). Targets only the
+# known credential paths so it stays fast.
+for p in \
+    /opt/data/home/.hermes \
+    /opt/data/home/.config \
+    /opt/data/home/.gitconfig \
+    /opt/data/home/.git-credentials \
+    /opt/data/.hermes \
+    /opt/data/google_token.json \
+    /opt/data/google_client_secret.json
+do
+    [ -e "$p" ] && chown -R hermes:hermes "$p" 2>/dev/null || true
+done
+echo "[cred-perms] ensured hermes owns credential paths on /opt/data"

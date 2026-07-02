@@ -297,6 +297,8 @@ RUN mkdir -p /etc/cont-init.d && \
     chmod +x /etc/cont-init.d/01-hermes-setup
 COPY --chmod=0755 docker/cont-init.d/015-supervise-perms /etc/cont-init.d/015-supervise-perms
 COPY --chmod=0755 docker/cont-init.d/02-reconcile-profiles /etc/cont-init.d/02-reconcile-profiles
+# Own out-of-band credential files (railway volume uploads) to hermes each boot.
+COPY --chmod=0755 docker/cont-init.d/016-hermes-cred-perms /etc/cont-init.d/016-hermes-cred-perms
 
 # ---------- Runtime ----------
 ENV HERMES_WEB_DIST=/opt/hermes/hermes_cli/web_dist
