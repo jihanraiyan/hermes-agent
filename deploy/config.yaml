@@ -37,3 +37,12 @@ terminal:
   env_passthrough:
     - HERMES_HOME
     - GITHUB_TOKEN
+
+# Autonomous background jobs: the agent can delegate long multi-step work to
+# background subagents that run without blocking the chat and text the result
+# back when done. Subagents inherit the parent's creds + env_passthrough.
+delegation:
+  max_async_children: 5      # concurrent background jobs
+  max_concurrent_children: 3 # workers in a single sync batch
+  max_spawn_depth: 2         # allow an orchestrator to spawn its own children
+  subagent_auto_approve: false  # keep the command-safety gate on for subagents

@@ -37,6 +37,8 @@ from gateway.platforms.base import (
     MessageEvent,
     MessageType,
     SendResult,
+    cache_audio_from_url,
+    cache_image_from_url,
 )
 from gateway.platforms.helpers import redact_phone, strip_markdown
 
@@ -45,6 +47,7 @@ logger = logging.getLogger(__name__)
 SENDBLUE_API_BASE = "https://api.sendblue.co"
 SEND_MESSAGE_PATH = "/api/send-message"
 TYPING_PATH = "/api/send-typing-indicator"
+UPLOAD_FILE_PATH = "/api/upload-file"
 MAX_SENDBLUE_LENGTH = 4000  # well under Sendblue's 18996 cap; nicer iMessage bubbles
 DEFAULT_WEBHOOK_HOST = "0.0.0.0"  # cloud-first (Railway); set 127.0.0.1 + tunnel locally
 DEFAULT_WEBHOOK_PORT = 8646
@@ -241,6 +244,125 @@ class SendblueAdapter(BasePlatformAdapter):
             chat_id, self.format_message(caption or ""), media_url=image_url
         )
 
+    async def send_image_file(
+        self,
+        chat_id: str,
+        image_path: str,
+        caption: Optional[str] = None,
+        reply_to: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        **kwargs,
+    ) -> SendResult:
+        """Send a local image file (upload to Sendblue, then send its media_url)."""
+        return await self._send_local_media(chat_id, image_path, caption)
+
+    async def send_document(
+        self,
+        chat_id: str,
+        file_path: str,
+        caption: Optional[str] = None,
+        file_name: Optional[str] = None,
+        reply_to: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        **kwargs,
+    ) -> SendResult:
+        """Send a local document/file via Sendblue."""
+        return await self._send_local_media(chat_id, file_path, caption)
+
+    async def send_voice(
+        self,
+        chat_id: str,
+        audio_path: str,
+        caption: Optional[str] = None,
+        reply_to: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        **kwargs,
+    ) -> SendResult:
+        """Send audio as an inline iMessage voice note.
+
+        iMessage voice bubbles want a .caf/opus file, so convert first (ffmpeg is
+        in the image). Fall back to the original audio as a plain attachment if
+        conversion fails.
+        """
+        path = await self._to_caf(audio_path) or audio_path
+        return await self._send_local_media(chat_id, path, caption)
+
+    async def _send_local_media(
+        self, chat_id: str, file_path: str, caption: Optional[str]
+    ) -> SendResult:
+        """Upload a local file to Sendblue, then send it as media."""
+        try:
+            media_url = await self._upload_media_file(file_path)
+        except Exception as exc:  # noqa: BLE001
+            logger.error(
+                "[sendblue] media upload failed for %s: %s",
+                redact_phone(chat_id),
+                exc,
+            )
+            return SendResult(success=False, error=str(exc), retryable=True)
+        return await self._post_message(
+            chat_id, self.format_message(caption or ""), media_url=media_url
+        )
+
+    async def _upload_media_file(self, file_path: str) -> str:
+        """Upload a local file to Sendblue; return the hosted media_url.
+
+        POST /api/upload-file — multipart form (field 'file') + auth headers.
+        Response: {"status": "OK", "media_url": "...", "mediaObjectId": "..."}.
+        """
+        import aiohttp
+
+        session = self._http_session
+        if session is None:
+            raise RuntimeError("Sendblue HTTP session not initialized")
+        with open(file_path, "rb") as fh:
+            form = aiohttp.FormData()
+            form.add_field("file", fh, filename=os.path.basename(file_path))
+            # Auth headers only; let aiohttp set the multipart Content-Type/boundary.
+            headers = {
+                "sb-api-key-id": self._api_key_id,
+                "sb-api-secret-key": self._api_secret_key,
+            }
+            async with session.post(
+                f"{SENDBLUE_API_BASE}{UPLOAD_FILE_PATH}",
+                data=form,
+                headers=headers,
+            ) as resp:
+                body = await resp.json(content_type=None)
+                if resp.status >= 400 or not isinstance(body, dict):
+                    msg = ""
+                    if isinstance(body, dict):
+                        msg = body.get("message") or body.get("error_message") or ""
+                    raise RuntimeError(f"upload-file {resp.status}: {msg or 'failed'}")
+                media_url = body.get("media_url", "")
+                if not media_url:
+                    raise RuntimeError("upload-file returned no media_url")
+                return str(media_url)
+
+    async def _to_caf(self, audio_path: str) -> Optional[str]:
+        """Convert audio to .caf/opus for an inline iMessage voice note.
+
+        Returns the .caf path on success, or None to fall back to the original.
+        """
+        if audio_path.lower().endswith(".caf"):
+            return audio_path
+        base = audio_path.rsplit(".", 1)[0] if "." in audio_path else audio_path
+        out_path = f"{base}.caf"
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "ffmpeg", "-y", "-i", audio_path,
+                "-acodec", "opus", "-b:a", "24k", out_path,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            await proc.wait()
+            if proc.returncode == 0 and os.path.exists(out_path):
+                return out_path
+            logger.warning("[sendblue] ffmpeg .caf conversion exit=%s", proc.returncode)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[sendblue] .caf conversion failed: %s", exc)
+        return None
+
     async def send_typing(self, chat_id: str, metadata: Optional[Dict[str, Any]] = None) -> None:
         """Best-effort iMessage typing bubble; never blocks or raises."""
         payload = {"number": chat_id, "from_number": self._from_number}
@@ -359,6 +481,7 @@ class SendblueAdapter(BasePlatformAdapter):
         from_number = str(payload.get("from_number", "")).strip()
         content = str(payload.get("content", "") or "").strip()
         message_id = str(payload.get("message_handle", "") or "")
+        media_url = str(payload.get("media_url", "") or "").strip()
 
         # Ignore echoes of our own number and non-inbound events.
         if payload.get("is_outbound"):
@@ -366,7 +489,8 @@ class SendblueAdapter(BasePlatformAdapter):
         if from_number and from_number == self._from_number:
             logger.debug("[sendblue] ignoring echo from own number")
             return web.json_response({"ok": True})
-        if not from_number or not content:
+        # Allow media-only messages (a photo/voice note with no caption).
+        if not from_number or (not content and not media_url):
             return web.json_response({"ok": True})
 
         # Reject spoofed/malformed sender identities before they become a session key.
@@ -383,7 +507,9 @@ class SendblueAdapter(BasePlatformAdapter):
             while len(self._seen_ids) > _DEDUP_MAX:
                 self._seen_ids.popitem(last=False)
 
-        safe_content = content[:80].replace("\n", "\\n").replace("\r", "\\r")
+        safe_content = (content[:80] or f"[media {media_url[:60]}]").replace(
+            "\n", "\\n"
+        ).replace("\r", "\\r")
         logger.info(
             "[sendblue] inbound from %s: %s",
             redact_phone(from_number),
@@ -397,12 +523,42 @@ class SendblueAdapter(BasePlatformAdapter):
             user_id=from_number,
             user_name=from_number,
         )
+
+        # Download inbound media so the agent can see images (native vision) or
+        # handle audio. Best-effort: on failure, fall back to a text-only event.
+        media_urls: List[str] = []
+        media_types: List[str] = []
+        msg_type = MessageType.TEXT
+        if media_url:
+            ctype = str(
+                payload.get("media_type") or payload.get("content_type") or ""
+            ).strip().lower()
+            is_audio = ctype.startswith("audio/") or media_url.lower().endswith(
+                (".caf", ".m4a", ".mp3", ".aac", ".ogg", ".wav", ".amr")
+            )
+            try:
+                if is_audio:
+                    local = await cache_audio_from_url(media_url)
+                    media_types.append(ctype or "audio/m4a")
+                    if not content:
+                        msg_type = MessageType.VOICE
+                else:
+                    local = await cache_image_from_url(media_url)
+                    media_types.append(ctype or "image/jpeg")
+                    if not content:
+                        msg_type = MessageType.PHOTO
+                media_urls.append(local)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[sendblue] failed to cache inbound media: %s", exc)
+
         event = MessageEvent(
             text=content,
-            message_type=MessageType.TEXT,
+            message_type=msg_type,
             source=source,
             raw_message=payload,
             message_id=message_id,
+            media_urls=media_urls,
+            media_types=media_types,
         )
 
         # Non-blocking: Sendblue only needs a fast 2xx ack.
