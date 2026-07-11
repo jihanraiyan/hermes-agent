@@ -16,7 +16,11 @@ Gateway-specific env vars:
   - SENDBLUE_WEBHOOK_TOKEN     (optional shared secret; required as ?token= when set)
   - SENDBLUE_ALLOWED_USERS     (comma-separated E.164 numbers)
   - SENDBLUE_ALLOW_ALL_USERS   (true/false)
+  - SENDBLUE_USER_NAMES        (optional "+E164=Name,..." roster; display only)
   - SENDBLUE_HOME_CHANNEL      (number for cron delivery)
+
+Onboard/offboard a teammate (keeps ALLOWED_USERS + USER_NAMES in sync) with
+scripts/add_teammate.py — see deploy/TEAMMATES.md.
 
 Sendblue does not sign inbound webhooks, so authenticity rests on the optional
 shared-secret token plus the gateway's per-user allowlist.
@@ -63,6 +67,26 @@ def _extra_or_env(extra: Dict[str, Any], key: str, env: str, default: str = "") 
     if value is None or value == "":
         value = os.getenv(env, default)
     return str(value).strip()
+
+
+def _parse_user_names(raw: str) -> Dict[str, str]:
+    """Parse a roster string into an E.164 -> display-name map.
+
+    Format: comma-separated ``+E164=Name`` pairs, e.g.
+    ``+14843693839=Jihan,+14259853177=Kunal``. Lets a multi-user deployment
+    address each sender by name (and lets the agent see who a message is from)
+    instead of a raw phone number. Malformed entries are skipped.
+    """
+    mapping: Dict[str, str] = {}
+    for pair in (raw or "").split(","):
+        pair = pair.strip()
+        if not pair or "=" not in pair:
+            continue
+        number, name = pair.split("=", 1)
+        number, name = number.strip(), name.strip()
+        if number and name:
+            mapping[number] = name
+    return mapping
 
 
 def check_requirements() -> bool:
@@ -115,6 +139,12 @@ class SendblueAdapter(BasePlatformAdapter):
             self._webhook_path = f"/{self._webhook_path}"
         self._webhook_token = _extra_or_env(
             extra, "webhook_token", "SENDBLUE_WEBHOOK_TOKEN"
+        )
+        # Optional roster mapping sender E.164 numbers to display names so the
+        # agent always knows who it is texting on a shared number (multi-user
+        # deployments). Empty roster => fall back to the raw number.
+        self._user_names = _parse_user_names(
+            _extra_or_env(extra, "user_names", "SENDBLUE_USER_NAMES", "")
         )
 
         self._runner = None
@@ -516,12 +546,17 @@ class SendblueAdapter(BasePlatformAdapter):
             safe_content,
         )
 
+        # Resolve a friendly name for the sender (falls back to the number).
+        # chat_id / user_id stay the raw E.164 so routing, sessions, and
+        # pairing/auth (which match on user_id) are unchanged — only the
+        # display name the agent sees is enriched.
+        display_name = self._user_names.get(from_number, from_number)
         source = self.build_source(
             chat_id=from_number,
-            chat_name=from_number,
+            chat_name=display_name,
             chat_type="dm",
             user_id=from_number,
-            user_name=from_number,
+            user_name=display_name,
         )
 
         # Download inbound media so the agent can see images (native vision) or
@@ -551,8 +586,18 @@ class SendblueAdapter(BasePlatformAdapter):
             except Exception as exc:  # noqa: BLE001
                 logger.warning("[sendblue] failed to cache inbound media: %s", exc)
 
+        # Tag the inbound text with the sender so the agent always knows who it
+        # is replying to (DMs never get the gateway's group sender-prefix). Skip
+        # slash commands so "/help", "/new", etc. still parse from the start.
+        # Uses raw ``content`` only here — the media/type detection above already
+        # ran against the unprefixed content.
+        if content.startswith("/"):
+            event_text = content
+        else:
+            event_text = f"[{display_name}] {content}".rstrip()
+
         event = MessageEvent(
-            text=content,
+            text=event_text,
             message_type=msg_type,
             source=source,
             raw_message=payload,
