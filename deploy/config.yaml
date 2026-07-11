@@ -3,21 +3,79 @@
 # Seed this to $HERMES_HOME/config.yaml — that's /opt/data/config.yaml in the
 # Docker image / Railway volume (HERMES_HOME=/opt/data, set by the Dockerfile).
 #
-# Secrets (ANTHROPIC_API_KEY, SENDBLUE_*) come from environment variables / .env,
-# NOT this file. The Sendblue platform also auto-enables from those env vars via
-# the plugin's env_enablement_fn, so this file mainly pins the model.
+# Secrets (ANTHROPIC_API_KEY, SENDBLUE_*, OPENROUTER_API_KEY) come from
+# environment variables / .env, NOT this file. The Sendblue platform also
+# auto-enables from those env vars via the plugin's env_enablement_fn, so this
+# file mainly pins the model + routing.
 #
-# Provider is auto-detected from ANTHROPIC_API_KEY. Without model.default the
-# gateway falls back to a default Claude model; we pin Sonnet 4.6 explicitly.
+# Provider is auto-detected from ANTHROPIC_API_KEY / CLAUDE_CODE_OAUTH_TOKEN.
+# Without model.default the gateway falls back to a default Claude model; we pin
+# Sonnet 4.6 explicitly.
 
 model:
   provider: anthropic
   default: claude-sonnet-4-6
 
+# Fallback provider chain. Primary = the Claude Max subscription (OAuth token,
+# CLAUDE_CODE_OAUTH_TOKEN). When the subscription is exhausted the provider
+# returns a "billing" 400 ("out of extra usage") which Hermes classifies as
+# FailoverReason.billing and fails over down this list — all the SAME model
+# (Sonnet 4.6), so quality + persona never change. When the subscription window
+# resets, the primary works again automatically (failover is per-request).
+#
+# Order = cheapest first:
+#   1. Direct Anthropic API key — pay-per-token billed to the account's API
+#      credit balance (a DIFFERENT bucket than the Max subscription quota, so it
+#      keeps working when the subscription is dry). Cheapest paid Claude.
+#      IMPORTANT: the key is read from ANTHROPIC_FALLBACK_KEY, NOT the standard
+#      ANTHROPIC_API_KEY — because the anthropic provider auto-detects
+#      ANTHROPIC_API_KEY/ANTHROPIC_TOKEN/CLAUDE_CODE_OAUTH_TOKEN for the PRIMARY
+#      and would hijack it (API key wins over OAuth). A non-standard var name
+#      keeps the primary on the subscription and this key fallback-only.
+#   2. OpenRouter Sonnet 4.6 — redundant backup if the Anthropic account has no
+#      credit / is unreachable. Reads OPENROUTER_API_KEY from the environment.
+fallback_model:
+  - provider: anthropic
+    model: claude-sonnet-4-6
+    api_key_env: ANTHROPIC_FALLBACK_KEY
+  - provider: openrouter
+    model: anthropic/claude-sonnet-4.6
+
 platforms:
   sendblue:
     enabled: true
     typing_indicator: true
+
+# Context compaction (lossy summarization of the middle of the conversation).
+# Defaults are enabled/0.50/protect_last_n=20. Tuned tighter here for an
+# always-on personal chat bot: compact earlier and keep a leaner tail so a long
+# session's steady-state token cost stays low. Session rotation (daily 4am /
+# idle reset, gateway default) is the primary context strategy; this is the
+# safety net for a single long working session.
+compression:
+  enabled: true
+  threshold: 0.35        # compact at ~35% of the input budget (~70k) not ~50%
+  target_ratio: 0.15     # summarize harder — keep ~15% of the threshold
+  protect_last_n: 12     # smaller protected recent-message tail
+  protect_first_n: 3
+
+# Auxiliary model routing. Point the token-heavy background forks at a cheap,
+# always-available OpenRouter model instead of the main Claude subscription:
+#   - compression: the summarizer that shrinks oversized contexts. Routing it
+#     off the primary breaks the deadlock where a dry subscription can't even
+#     summarize to recover. gemini-3-flash has a 1M context so it ingests large
+#     transcripts fine, at a fraction of the cost.
+#   - background_review: the post-turn self-improvement fork. On the main model
+#     it replays the ENTIRE transcript every few turns (the single biggest
+#     hidden burn). A different model replays a compact digest instead, and it
+#     runs off-subscription on a cheap model.
+auxiliary:
+  compression:
+    provider: openrouter
+    model: google/gemini-3-flash-preview
+  background_review:
+    provider: openrouter
+    model: google/gemini-3-flash-preview
 
 # Fast one-shot web search + extraction. ddgs (DuckDuckGo) is keyless and baked
 # into the image. Browser tools + curl work regardless; this adds web_search.
