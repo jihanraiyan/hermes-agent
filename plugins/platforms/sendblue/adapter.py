@@ -60,6 +60,218 @@ WEBHOOK_BODY_MAX_BYTES = 65_536  # iMessage payloads are tiny; 64 KiB is generou
 _DEDUP_MAX = 500  # bounded LRU of recent message handles (Sendblue redelivers)
 _E164_RE = re.compile(r"^\+[1-9]\d{7,14}$")
 
+# Max bubbles per send() call -- prevents cron runaway fan-out on long output.
+_MAX_BUBBLES = 5
+# Min fragment length; shorter fragments are merged into the previous bubble.
+_MIN_FRAGMENT_LEN = 25
+# Split threshold: paragraph-split only below this total length.
+_PARAGRAPH_SPLIT_THRESHOLD = 2000
+
+
+# ---------------------------------------------------------------------------
+# Humanizer: rewrite gateway boilerplate into texting-voice strings.
+# Ordered list of (pattern, replacement) tuples; first match wins.
+# Pass-through (fail-open): if no pattern matches, return text unchanged.
+# Replacement is a string or callable(match) -> str.
+# ---------------------------------------------------------------------------
+
+# Compiled once at module load for performance.
+_HUMANIZE_TABLE: List[tuple] = [
+    # run.py:357-360 -- provider auth failure
+    (
+        re.compile(r"^\s*⚠️\s+Provider authentication failed", re.IGNORECASE),
+        "something's broken on my end (auth issue), give me a bit",
+    ),
+    # run.py:361-365 -- provider policy rejection
+    (
+        re.compile(r"^\s*⚠️\s+The model provider rejected", re.IGNORECASE),
+        "hm, that one got blocked on my end. try saying it differently?",
+    ),
+    # run.py:367 -- rate limiting
+    (
+        re.compile(r"^\s*⏱️\s+The model provider is rate.limit", re.IGNORECASE),
+        "i'm getting rate limited, give me a minute and try again",
+    ),
+    # run.py:369-371 -- provider failed after retries
+    (
+        re.compile(r"^\s*⚠️\s+The model provider failed after retries", re.IGNORECASE),
+        "something's broken on my end, give me a min and resend that",
+    ),
+    # run.py:2437-2440 -- context window too large
+    (
+        re.compile(r"^\s*⚠️\s+Session too large", re.IGNORECASE),
+        "my head's too full from this convo, text /reset and we'll start fresh",
+    ),
+    # run.py:2442-2444 -- request failed with raw error detail. Anchored on the
+    # gateway's trailing "/reset" hint too, so agent prose that merely starts
+    # with "The request failed:" passes through untouched.
+    (
+        re.compile(r"^\s*The request failed:.*/reset", re.IGNORECASE | re.DOTALL),
+        "that didn't go through on my end. try again in a sec",
+    ),
+    # run.py:2450 -- processing stopped partial
+    (
+        re.compile(r"^\s*⚠️\s+Processing stopped:", re.IGNORECASE),
+        "missed that one while i was wrapping something up, send it again?",
+    ),
+    # run.py:2451-2454 -- processing completed but no response
+    (
+        re.compile(r"^\s*⚠️\s+Processing completed but no response", re.IGNORECASE),
+        "missed that one while i was wrapping something up, send it again?",
+    ),
+    # run.py:2467-2470 -- message wasn't processed (previous turn cleaned up)
+    (
+        re.compile(r"^\s*⚠️\s+Your message wasn't processed", re.IGNORECASE),
+        "missed that one while i was wrapping something up, send it again?",
+    ),
+    # run.py:10319-10323 -- session automatically reset (suspended-bypass survivor)
+    (
+        re.compile(r"^\s*◐\s+Session automatically reset", re.IGNORECASE),
+        "heads up, i had to restart so we're starting fresh. what were we on?",
+    ),
+    # run.py:8494-8499 -- pairing message with code (regex extracts code)
+    (
+        re.compile(
+            r"Hi~\s+I don't recognize you yet.*?`hermes pairing approve \S+ (\S+)`",
+            re.DOTALL | re.IGNORECASE,
+        ),
+        lambda m: f"hey! i don't know this number yet. ask Jihan to add you, your code is {m.group(1)}",
+    ),
+    # run.py:8504-8506 -- too many pairing requests
+    (
+        re.compile(r"Too many pairing requests right now", re.IGNORECASE),
+        "too many pairing requests right now, try again in a bit",
+    ),
+    # run.py:18120 -- heartbeat "Working" bubble (gateway string has an em dash
+    # after "Working"; anchor without the dash so punctuation drift can't break it)
+    (
+        re.compile(r"^\s*⏳\s+Working\b", re.IGNORECASE),
+        "one sec, still on your last thing",
+    ),
+    # run.py:5168 -- subagent working queued
+    (
+        re.compile(r"^\s*⏳\s+Subagent working", re.IGNORECASE),
+        "one sec, still on your last thing",
+    ),
+    # run.py:5173 -- compressing context queued
+    (
+        re.compile(r"^\s*⏳\s+Compressing context", re.IGNORECASE),
+        "one sec, still on your last thing",
+    ),
+    # run.py:5178 -- queued for next turn
+    (
+        re.compile(r"^\s*⏳\s+Queued for the next turn", re.IGNORECASE),
+        "one sec, still on your last thing",
+    ),
+    # run.py:5183 -- interrupting current task
+    (
+        re.compile(r"^\s*⚡\s+Interrupting current task", re.IGNORECASE),
+        "one sec, still on your last thing",
+    ),
+    # scheduler.py:69 -- cron heartbeat job failure: suppress entirely (return "")
+    (
+        re.compile(r"^\s*⚠️\s+Cron '(heartbeat[^']*)'", re.IGNORECASE),
+        "",
+    ),
+    # scheduler.py:69-100 -- other cron failure: human note
+    (
+        re.compile(r"^\s*⚠️\s+Cron '([^']+)' failed:", re.IGNORECASE),
+        lambda m: f"hm, my reminder for \"{m.group(1)}\" hit a snag, might be worth checking",
+    ),
+]
+
+
+# delivery.py:445 -- truncated cron output footer. Substituted in place (the
+# real content precedes the footer, so this must NOT replace the whole message).
+# Dead branch for sendblue after splits_long_messages=True; kept defensively.
+_RE_TRUNC_FOOTER = re.compile(
+    r"\n*\.\.\.\s*\[truncated, full output saved to [^\]]*\]", re.IGNORECASE
+)
+_CUT_SHORT_NOTE = "(cut it short, ask me if you want the rest)"
+
+
+def _humanize_gateway_notice(text: str) -> str:
+    """Rewrite known gateway boilerplate into texting-voice strings.
+
+    Iterates the ordered _HUMANIZE_TABLE; first match wins. Fail-open:
+    unrecognized text is returned unchanged. Called before strip_markdown
+    in format_message() and also in _standalone_send().
+    """
+    # In-place footer rewrite first: keeps the content, humanizes the suffix.
+    text = _RE_TRUNC_FOOTER.sub(f"\n\n{_CUT_SHORT_NOTE}", text)
+    for pattern, replacement in _HUMANIZE_TABLE:
+        m = pattern.search(text)
+        if m:
+            if callable(replacement):
+                return replacement(m)
+            return replacement
+    return text
+
+
+# ---------------------------------------------------------------------------
+# Extended markdown stripper: runs AFTER strip_markdown() in format_message().
+# Does NOT duplicate work already done by helpers.strip_markdown().
+# ---------------------------------------------------------------------------
+
+_RE_BULLET = re.compile(r"^[-*+]\s+", re.MULTILINE)
+_RE_BLOCKQUOTE = re.compile(r"^>\s?", re.MULTILINE)
+_RE_HR = re.compile(r"^([-*_]\s?){3,}$", re.MULTILINE)
+_RE_STRIKETHROUGH = re.compile(r"~~(.+?)~~", re.DOTALL)
+_RE_EM_DASH_SPACED = re.compile(r" — ")
+_RE_EM_DASH_BARE = re.compile(r"—")
+# Guard: leading [Name] tag echo at message start only (1-24 non-newline chars)
+_RE_NAME_TAG_LEAD = re.compile(r"^\[[^\]\n]{1,24}\]\s+")
+# GFM pipe table: header row + separator row + data rows
+_RE_TABLE_SEPARATOR = re.compile(r"^\|[-| :]+\|$")
+
+
+def _strip_markdown_extra(text: str) -> str:
+    """Strip remaining markdown artifacts not handled by helpers.strip_markdown().
+
+    Handles: bullets, blockquotes, horizontal rules, strikethrough, GFM pipe
+    tables, em-dash normalization, and leading [Name] tag echo guard.
+    """
+    # GFM pipe tables: convert to col: val lines before splitting on newlines.
+    lines = text.split("\n")
+    result_lines: List[str] = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        # Detect a table header row (starts and ends with |)
+        if line.startswith("|") and line.endswith("|") and i + 1 < len(lines):
+            next_line = lines[i + 1]
+            if _RE_TABLE_SEPARATOR.match(next_line.strip()):
+                # Parse headers
+                headers = [h.strip() for h in line.strip("|").split("|")]
+                i += 2  # skip header + separator
+                # Consume data rows
+                while i < len(lines) and lines[i].startswith("|") and lines[i].endswith("|"):
+                    cells = [c.strip() for c in lines[i].strip("|").split("|")]
+                    for col_idx, cell in enumerate(cells):
+                        col_name = headers[col_idx] if col_idx < len(headers) else f"col{col_idx}"
+                        result_lines.append(f"{col_name}: {cell}")
+                    i += 1
+                continue
+        result_lines.append(line)
+        i += 1
+    text = "\n".join(result_lines)
+
+    # Bullet markers: drop the marker, keep the content on its own line.
+    text = _RE_BULLET.sub("", text)
+    # Blockquote markers: drop the leading "> " or ">"
+    text = _RE_BLOCKQUOTE.sub("", text)
+    # Horizontal rules: drop the whole line
+    text = _RE_HR.sub("", text)
+    # Strikethrough: unwrap
+    text = _RE_STRIKETHROUGH.sub(r"\1", text)
+    # Em-dash: spaced variant -> ", "; bare -> "-"
+    text = _RE_EM_DASH_SPACED.sub(", ", text)
+    text = _RE_EM_DASH_BARE.sub("-", text)
+    # Leading [Name] tag echo guard (message start only)
+    text = _RE_NAME_TAG_LEAD.sub("", text)
+
+    return text
+
 
 def _extra_or_env(extra: Dict[str, Any], key: str, env: str, default: str = "") -> str:
     """Read a setting from PlatformConfig.extra, falling back to an env var."""
@@ -110,6 +322,9 @@ class SendblueAdapter(BasePlatformAdapter):
     """
 
     MAX_MESSAGE_LENGTH = MAX_SENDBLUE_LENGTH
+    # Signals delivery.py to skip its truncate-with-path-footer branch; this
+    # adapter chunks natively via send() paragraph splitting + truncate_message.
+    splits_long_messages = True
 
     def __init__(self, config: PlatformConfig):
         super().__init__(config=config, platform=Platform("sendblue"))
@@ -124,7 +339,7 @@ class SendblueAdapter(BasePlatformAdapter):
         self._webhook_host = _extra_or_env(
             extra, "webhook_host", "SENDBLUE_WEBHOOK_HOST", DEFAULT_WEBHOOK_HOST
         )
-        # Port precedence: explicit config/env → Railway's injected $PORT → default.
+        # Port precedence: explicit config/env -> Railway's injected $PORT -> default.
         # Binding $PORT lets Railway (and similar PaaS) route + health-check the
         # webhook automatically without a hardcoded port.
         self._webhook_port = int(
@@ -174,7 +389,7 @@ class SendblueAdapter(BasePlatformAdapter):
             return False
 
         if not self._from_number:
-            msg = "[sendblue] SENDBLUE_NUMBER not set — cannot send replies"
+            msg = "[sendblue] SENDBLUE_NUMBER not set -- cannot send replies"
             logger.error(msg)
             self._set_fatal_error("sendblue_missing_from_number", msg, retryable=False)
             return False
@@ -196,7 +411,7 @@ class SendblueAdapter(BasePlatformAdapter):
             return False
         if not self._webhook_token:
             logger.warning(
-                "[sendblue] SENDBLUE_INSECURE_NO_TOKEN=true — webhook is "
+                "[sendblue] SENDBLUE_INSECURE_NO_TOKEN=true -- webhook is "
                 "unauthenticated. Anyone who reaches it can inject messages. The "
                 "per-user allowlist still applies. Do NOT use this in production."
             )
@@ -251,14 +466,63 @@ class SendblueAdapter(BasePlatformAdapter):
         reply_to: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> SendResult:
+        """Format, split into natural bubbles, and send sequentially."""
         formatted = self.format_message(content)
-        chunks = self.truncate_message(formatted)
+
+        # Empty after formatting: skip API call, return success.
+        if not formatted.strip():
+            return SendResult(success=True)
+
+        if len(formatted) < _PARAGRAPH_SPLIT_THRESHOLD:
+            # Paragraph-split path: split on double newline, merge short fragments.
+            raw_fragments = formatted.split("\n\n")
+            bubbles: List[str] = []
+            for frag in raw_fragments:
+                frag = frag.strip()
+                if not frag:
+                    continue
+                if bubbles and len(frag) < _MIN_FRAGMENT_LEN:
+                    # Merge short fragment into the previous bubble.
+                    bubbles[-1] = bubbles[-1] + "\n\n" + frag
+                else:
+                    bubbles.append(frag)
+            # Cap at _MAX_BUBBLES; join overflow into the last bubble.
+            if len(bubbles) > _MAX_BUBBLES:
+                tail = bubbles[_MAX_BUBBLES - 1:]
+                bubbles = bubbles[: _MAX_BUBBLES - 1] + ["\n\n".join(tail)]
+        else:
+            # Long message path: no paragraph split; chunk via truncate_message.
+            chunks = self.truncate_message(formatted, max_length=MAX_SENDBLUE_LENGTH)
+            if len(chunks) > _MAX_BUBBLES:
+                tail_chunks = chunks[_MAX_BUBBLES - 1:]
+                chunks = chunks[: _MAX_BUBBLES - 1] + ["\n\n".join(tail_chunks)]
+            bubbles = chunks
+
+        # Per-bubble: apply 4000-char cap and strip (N/M) indicators.
+        _NM_RE = re.compile(r"\s\(\d+/\d+\)$")
+        final_bubbles: List[str] = []
+        for bubble in bubbles:
+            capped = self.truncate_message(bubble, max_length=MAX_SENDBLUE_LENGTH)
+            # Use only the first chunk (cap); strip (N/M) suffix if present.
+            chunk = capped[0] if capped else bubble
+            chunk = _NM_RE.sub("", chunk)
+            if len(capped) > 1:
+                # Content was dropped by the cap: say so instead of silence.
+                # (Sendblue's real limit is ~19k, so slightly exceeding the
+                # cosmetic 4000 cap with the note is safe.)
+                chunk = f"{chunk}\n\n{_CUT_SHORT_NOTE}"
+            if chunk.strip():
+                final_bubbles.append(chunk)
+
+        # Sequential sends with sleep between (not after the last one).
         last_result = SendResult(success=True)
-        for chunk in chunks:
-            result = await self._post_message(chat_id, chunk)
+        for idx, bubble in enumerate(final_bubbles):
+            result = await self._post_message(chat_id, bubble)
             if not result.success:
                 return result
             last_result = result
+            if idx < len(final_bubbles) - 1:
+                await asyncio.sleep(0.8)
         return last_result
 
     async def send_image(
@@ -337,7 +601,7 @@ class SendblueAdapter(BasePlatformAdapter):
     async def _upload_media_file(self, file_path: str) -> str:
         """Upload a local file to Sendblue; return the hosted media_url.
 
-        POST /api/upload-file — multipart form (field 'file') + auth headers.
+        POST /api/upload-file -- multipart form (field 'file') + auth headers.
         Response: {"status": "OK", "media_url": "...", "mediaObjectId": "..."}.
         """
         import aiohttp
@@ -411,15 +675,21 @@ class SendblueAdapter(BasePlatformAdapter):
                         redact_phone(chat_id),
                         resp.status,
                     )
-        except Exception as exc:  # noqa: BLE001 — typing is non-critical
+        except Exception as exc:  # noqa: BLE001 -- typing is non-critical
             logger.debug("[sendblue] typing indicator error: %s", exc)
 
     async def get_chat_info(self, chat_id: str) -> Dict[str, Any]:
         return {"name": chat_id, "type": "dm"}
 
     def format_message(self, content: str) -> str:
-        """Strip markdown — iMessage renders it as literal characters."""
-        return strip_markdown(content)
+        """Humanize gateway notices, then strip markdown for iMessage."""
+        # 1. Rewrite known gateway boilerplate into texting-voice strings.
+        content = _humanize_gateway_notice(content)
+        # 2. Core markdown stripping (bold, italic, code fences, headings, links).
+        content = strip_markdown(content)
+        # 3. Extended stripping (bullets, blockquotes, hr, tables, em-dash, name tags).
+        content = _strip_markdown_extra(content)
+        return content
 
     # ------------------------------------------------------------------
     # Outbound HTTP
@@ -487,7 +757,7 @@ class SendblueAdapter(BasePlatformAdapter):
     async def _handle_webhook(self, request) -> "aiohttp.web.Response":
         from aiohttp import web
 
-        # Shared-secret gate (Sendblue does not sign requests) — constant-time.
+        # Shared-secret gate (Sendblue does not sign requests) -- constant-time.
         if self._webhook_token:
             supplied = request.query.get("token") or request.headers.get(
                 "X-Webhook-Token", ""
@@ -548,7 +818,7 @@ class SendblueAdapter(BasePlatformAdapter):
 
         # Resolve a friendly name for the sender (falls back to the number).
         # chat_id / user_id stay the raw E.164 so routing, sessions, and
-        # pairing/auth (which match on user_id) are unchanged — only the
+        # pairing/auth (which match on user_id) are unchanged -- only the
         # display name the agent sees is enriched.
         display_name = self._user_names.get(from_number, from_number)
         source = self.build_source(
@@ -589,7 +859,7 @@ class SendblueAdapter(BasePlatformAdapter):
         # Tag the inbound text with the sender so the agent always knows who it
         # is replying to (DMs never get the gateway's group sender-prefix). Skip
         # slash commands so "/help", "/new", etc. still parse from the start.
-        # Uses raw ``content`` only here — the media/type detection above already
+        # Uses raw ``content`` only here -- the media/type detection above already
         # ran against the unprefixed content.
         if content.startswith("/"):
             event_text = content
@@ -704,7 +974,15 @@ async def _standalone_send(
             )
         }
 
+    # Humanize + strip markdown + extended strip, same pipeline as format_message().
+    message = _humanize_gateway_notice(message)
     message = strip_markdown(message)
+    message = _strip_markdown_extra(message)
+
+    # Empty after processing: skip API call entirely (e.g. suppressed heartbeat failure).
+    if not message.strip():
+        return {"success": True, "platform": "sendblue", "chat_id": chat_id, "message_id": ""}
+
     headers = {
         "sb-api-key-id": api_key_id,
         "sb-api-secret-key": api_secret_key,
@@ -733,7 +1011,7 @@ async def _standalone_send(
                     "chat_id": chat_id,
                     "message_id": msg_id,
                 }
-    except Exception as exc:  # noqa: BLE001 — avoid leaking phone/URL from exc text
+    except Exception as exc:  # noqa: BLE001 -- avoid leaking phone/URL from exc text
         return {"error": f"Sendblue send failed: {type(exc).__name__}"}
 
 
@@ -743,7 +1021,7 @@ def _build_adapter(config):
 
 
 def register(ctx) -> None:
-    """Plugin entry point — called by the Hermes plugin system at startup."""
+    """Plugin entry point -- called by the Hermes plugin system at startup."""
     ctx.register_platform(
         name="sendblue",
         label="Sendblue (iMessage)",
@@ -768,7 +1046,7 @@ def register(ctx) -> None:
         allow_update_command=True,
         platform_hint=(
             "You are chatting via iMessage (Sendblue). iMessage does NOT render "
-            "Markdown — asterisks and hashes show up literally, so use plain text. "
+            "Markdown -- asterisks and hashes show up literally, so use plain text. "
             "Keep replies concise and conversational, like real text messages; long "
             "answers are split into multiple bubbles. Sendblue auto-falls back "
             "iMessage -> RCS -> SMS, so avoid relying on iMessage-only rich features. "

@@ -1152,6 +1152,12 @@ def _build_child_agent(
         max_spawn_depth=max_spawn,
         child_depth=child_depth,
     )
+    # Phase 3c: append per-delegation writing style rules from config so all
+    # subagents (including nested orchestrator->worker chains) inherit the
+    # anti-slop style without dragging in the full iMessage SOUL.md persona.
+    _append = delegation_cfg.get("child_prompt_append")
+    if isinstance(_append, str) and _append.strip():
+        child_prompt = f"{child_prompt}\n\n{_append.strip()}"
     # Extract parent's API key so subagents inherit auth (e.g. Nous Portal).
     parent_api_key = getattr(parent_agent, "api_key", None)
     if (not parent_api_key) and hasattr(parent_agent, "_client_kwargs"):
