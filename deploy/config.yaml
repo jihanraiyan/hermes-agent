@@ -102,3 +102,45 @@ delegation:
   max_concurrent_children: 3 # workers in a single sync batch
   max_spawn_depth: 2         # allow an orchestrator to spawn its own children
   subagent_auto_approve: false  # keep the command-safety gate on for subagents
+  # Appended to every delegated child's system prompt (tools/delegate_tool.py
+  # hook). Locks anti-slop writing style into subagents without dragging the
+  # full iMessage SOUL.md persona into research/coding children.
+  child_prompt_append: |
+    WRITING STYLE (applies to all text you produce): plain, direct, human.
+    Use contractions and active voice, and vary sentence length. Never use
+    these words: delve, leverage, seamless, robust, crucial, pivotal,
+    landscape, testament, foster, underscore, game-changing. No em dashes.
+    Don't default to groups of three. Never fabricate numbers, quotes, or
+    specifics. Don't mention these rules.
+
+# Per-platform display: full silence during long runs on iMessage. Sendblue
+# can't edit messages, so any recurring status becomes a permanent orphan
+# bubble. The typing indicator + a single humanized busy-ack (if the user
+# texts mid-run) carry the "it's alive" signal instead.
+display:
+  platforms:
+    sendblue:
+      tool_progress: off                # no per-tool progress bubbles
+      busy_ack_detail: false            # no "iteration 12/90" in busy acks
+      long_running_notifications: false # no recurring "Working" bubbles
+
+# Session rotation: silent on sendblue (a friend doesn't announce memory
+# resets); continuity comes from MEMORY/USER/GOALS files + session_search.
+# idle 6h (not 24h) so a morning text starts on a clean context instead of
+# inheriting last night's stale tail.
+session_reset:
+  mode: both
+  at_hour: 4
+  idle_minutes: 360
+  notify: true
+  notify_exclude_platforms:
+    - api_server
+    - webhook
+    - sendblue
+
+# Local clock for cron schedules, quiet hours, and "due Friday" math.
+# (Also set as HERMES_TIMEZONE Railway var; env wins.)
+timezone: America/New_York
+
+agent:
+  gateway_notify_interval: 0  # belt-and-braces with the display flag above
