@@ -18,8 +18,19 @@ for p in \
     /opt/data/home/.git-credentials \
     /opt/data/.hermes \
     /opt/data/google_token.json \
-    /opt/data/google_client_secret.json
+    /opt/data/google_client_secret.json \
+    /opt/data/mcp-tokens
 do
+    # Refuse symlinked targets: these paths sit on the agent-writable volume,
+    # and a root-run chown -R through a planted symlink is a privilege step-up.
+    [ -L "$p" ] && continue
     [ -e "$p" ] && chown -R hermes:hermes "$p" 2>/dev/null || true
 done
+# chown never touches mode bits; uploaded files keep whatever mode the upload
+# gave them until hermes first rewrites them (0600). Close that window for the
+# OAuth token store here.
+if [ -d /opt/data/mcp-tokens ] && [ ! -L /opt/data/mcp-tokens ]; then
+    chmod 0700 /opt/data/mcp-tokens 2>/dev/null || true
+    chmod -R go-rwx /opt/data/mcp-tokens 2>/dev/null || true
+fi
 echo "[cred-perms] ensured hermes owns credential paths on /opt/data"

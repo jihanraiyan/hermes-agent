@@ -144,3 +144,41 @@ timezone: America/New_York
 
 agent:
   gateway_notify_interval: 0  # belt-and-braces with the display flag above
+
+# Apollo.io people search + enrichment via Apollo's hosted MCP server (OAuth,
+# user-scoped — works on the free plan, unlike the REST API which is paywalled).
+# Tokens live at HERMES_HOME/mcp-tokens/apollo*.json (apollo.json +
+# .client.json + .meta.json), minted locally with `hermes mcp login apollo`.
+# If the refresh token dies: re-mint locally, re-upload ALL THREE files, then
+# `railway redeploy` — the boot-time chown in docker/cont-init.d/016 is what
+# makes them readable by hermes (a mid-run upload stays root-owned until then).
+#
+# Credits: PEOPLE search is free; company search costs 1 credit per non-empty
+# request; person enrichment costs 1 credit per match. Confirm-before-spend is
+# a model instruction baked into Apollo's tool descriptions (reinforced in
+# SOUL.md), NOT a hard enforcement — worst case is drained free-plan credits.
+# Those descriptions are unfiltered third-party input into agent context;
+# accepted risk of any hosted MCP server (hermes only warn-logs on suspicious
+# descriptions — grep logs for "suspicious description content").
+#
+# tools.include trims the server's 42 tools to the people/company-finding
+# core. This reduces context bloat and accidental model use ONLY — it is NOT
+# a security boundary: the OAuth token on disk grants the full 42-tool scope
+# (same accepted-risk class as google_token.json; rotate the Apollo grant
+# alongside the other creds). resources/prompts off = no utility bridge tools.
+# Phone reveals need apollo_webhook_result_show, which this server does NOT
+# expose — emails only; org data carries company switchboard phones.
+mcp_servers:
+  apollo:
+    url: "https://mcp.apollo.io/mcp"
+    auth: oauth
+    tools:
+      resources: false
+      prompts: false
+      include:
+        - apollo_mixed_people_api_search
+        - apollo_people_match
+        - apollo_people_bulk_match
+        - apollo_mixed_companies_search
+        - apollo_organizations_enrich
+        - apollo_users_api_profile
