@@ -182,6 +182,12 @@ mcp_servers:
         - apollo_mixed_companies_search
         - apollo_organizations_enrich
         - apollo_users_api_profile
+  granola:
+    url: "https://mcp.granola.ai/mcp"
+    auth: oauth
+    tools:
+      resources: false
+      prompts: false
   fiber:
     url: "https://mcp.fiber.ai/mcp/v2"
     headers:
