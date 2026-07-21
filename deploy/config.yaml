@@ -182,3 +182,18 @@ mcp_servers:
         - apollo_mixed_companies_search
         - apollo_organizations_enrich
         - apollo_users_api_profile
+  fiber:
+    url: "https://mcp.fiber.ai/mcp/v2"
+    headers:
+      x-api-key: "${FIBER_API_KEY}"
+    tools:
+      resources: false
+      prompts: false
+      # buyCredits / auto-topup tools deliberately excluded: the agent
+      # must never be able to spend real money on credits.
+      include:
+        - peopleSearch_tool
+        - companySearch_tool
+        - profileLiveEnrich_tool
+        - companyLiveEnrich_tool
+        - getOrgCredits_tool
